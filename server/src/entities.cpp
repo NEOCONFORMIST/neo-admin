@@ -1,0 +1,817 @@
+/**
+ * =============================================================================
+ * CS2Fixes
+ * Copyright (C) 2023-2026 Source2ZE
+ * =============================================================================
+ *
+ * This program is free software; you can redistribute it and/or modify it under
+ * the terms of the GNU General Public License, version 3.0, as published by the
+ * Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ * details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "entities.h"
+#include "ctimer.h"
+#include "entity.h"
+
+#include "entity/cbaseplayercontroller.h"
+#include "entity/ccsplayercontroller.h"
+#include "entity/ccsplayerpawn.h"
+#include "entity/cgameplayerequip.h"
+#include "entity/cgamerules.h"
+#include "entity/clogiccase.h"
+#include "entity/cpointviewcontrol.h"
+
+#include <unordered_map>
+#include <unordered_set>
+
+// #define ENTITY_HANDLER_ASSERTION
+
+static constexpr uint32_t ENTITY_MURMURHASH_SEED = 0x97984357;
+static constexpr uint32_t ENTITY_UNIQUE_INVALID = ~0u;
+
+static uint32_t GetEntityUnique(CBaseEntity* pEntity)
+{
+	const auto& sUniqueHammerID = pEntity->m_sUniqueHammerID();
+	if (sUniqueHammerID.IsEmpty())
+		return ENTITY_UNIQUE_INVALID;
+
+	return MurmurHash2LowerCase(sUniqueHammerID.Get(), ENTITY_MURMURHASH_SEED);
+}
+
+static bool StripPlayer(CCSPlayerPawn* pPawn)
+{
+	const auto pItemServices = pPawn->m_pItemServices();
+
+	if (!pItemServices)
+		return false;
+
+	pItemServices->StripPlayerWeapons(true);
+
+	return true;
+}
+
+static void StripPlayer(CCSPlayerPawn* pPawn, const std::unordered_set<uint32_t>& slots)
+{
+	const auto pWeaponService = pPawn->m_pWeaponServices();
+	if (!pWeaponService)
+		return;
+
+	CUtlVector<CHandle<CBasePlayerWeapon>>* weapons = pWeaponService->m_hMyWeapons();
+	std::vector<CBasePlayerWeapon*> vecWeaponsToRemove;
+
+	FOR_EACH_VEC(*weapons, i)
+	{
+		CBasePlayerWeapon* weapon = (*weapons)[i].Get();
+
+		if (!weapon)
+			continue;
+
+		const auto slot = weapon->GetWeaponVData()->m_GearSlot();
+
+		if (slots.contains(slot))
+		{
+			// Queue for removal after, don't modify this vector while we're iterating it
+			vecWeaponsToRemove.push_back(weapon);
+		}
+	}
+
+	for (CBasePlayerWeapon* pWeapon : vecWeaponsToRemove)
+	{
+		pWeaponService->DropWeapon(pWeapon);
+		pWeapon->Remove();
+	}
+}
+
+// Must be called in GameFramePre
+static void DelayInput(CBaseEntity* pCaller, const char* input, const char* param = "")
+{
+	const auto eh = pCaller->GetHandle();
+
+	CTimer::Create(0.f, TIMERFLAG_MAP | TIMERFLAG_ROUND, [eh, input, param]() {
+		if (const auto entity = reinterpret_cast<CBaseEntity*>(eh.Get()))
+			entity->AcceptInput(input, param, nullptr, entity);
+
+		return -1.f;
+	});
+}
+
+// Must be called in GameFramePre
+static void DelayInput(CBaseEntity* pCaller, CBaseEntity* pActivator, const char* input, const char* param = "")
+{
+	const auto eh = pCaller->GetHandle();
+	const auto ph = pActivator->GetHandle();
+
+	CTimer::Create(0.f, TIMERFLAG_MAP | TIMERFLAG_ROUND, [eh, ph, input, param]() {
+		const auto player = reinterpret_cast<CBaseEntity*>(ph.Get());
+		if (const auto entity = reinterpret_cast<CBaseEntity*>(eh.Get()))
+			entity->AcceptInput(input, param, player, entity);
+
+		return -1.f;
+	});
+}
+
+namespace CTriggerGravityHandler
+{
+	static std::unordered_map<uint32_t, float> s_gravityMap;
+
+	void OnPrecache(CBaseEntity* pEntity, const CEntityKeyValues* kv)
+	{
+		const auto pGravity = kv->GetKeyValue("gravity");
+		const auto pHammerId = kv->GetKeyValue("hammerUniqueId");
+		if (!pGravity || !pHammerId)
+			return;
+
+		const auto flGravity = pGravity->GetFloat();
+		const auto hEntity = MurmurHash2LowerCase(pHammerId->GetString(), ENTITY_MURMURHASH_SEED);
+
+		s_gravityMap[hEntity] = flGravity;
+	}
+
+	bool GravityTouching(CBaseEntity* pEntity, CBaseEntity* pOther)
+	{
+		const auto hEntity = GetEntityUnique(pEntity);
+		if (hEntity == ENTITY_UNIQUE_INVALID)
+			return false;
+
+		const auto gravity = s_gravityMap.find(hEntity);
+		if (gravity == s_gravityMap.end())
+			return false;
+
+		if (pOther->IsPawn() && pOther->IsAlive())
+			pOther->SetGravityScale(gravity->second);
+
+		return true;
+	}
+
+	void OnEndTouch(CBaseEntity* pEntity, CBaseEntity* pOther)
+	{
+		if (pOther->IsPawn())
+			pOther->SetGravityScale(1);
+	}
+
+	static void Shutdown()
+	{
+		s_gravityMap.clear();
+	}
+} // namespace CTriggerGravityHandler
+
+namespace CGamePlayerEquipHandler
+{
+	static std::unordered_map<uint32_t, std::unordered_set<uint32_t>> s_PlayerEquipMap;
+
+	void Use(CGamePlayerEquip* pEntity, InputData_t* pInput)
+	{
+		const auto pCaller = pInput->pActivator;
+
+		if (!pCaller || !pCaller->IsPawn())
+			return;
+
+		const auto pPawn = reinterpret_cast<CCSPlayerPawn*>(pCaller);
+
+		const auto flags = pEntity->m_spawnflags();
+
+		if (flags & CGamePlayerEquip::SF_PLAYEREQUIP_STRIPFIRST)
+		{
+			StripPlayer(pPawn);
+		}
+		else if (flags & CGamePlayerEquip::SF_PLAYEREQUIP_ONLYSTRIPSAME)
+		{
+			const auto& pair = s_PlayerEquipMap.find(GetEntityUnique(pEntity));
+			if (pair != s_PlayerEquipMap.end() && !pair->second.empty())
+				StripPlayer(pPawn, pair->second);
+		}
+	}
+
+	void TriggerForAllPlayers(CGamePlayerEquip* pEntity, InputData_t* pInput)
+	{
+		const auto flags = pEntity->m_spawnflags();
+
+		if (flags & CGamePlayerEquip::SF_PLAYEREQUIP_STRIPFIRST)
+		{
+			CCSPlayerPawn* pPawn = nullptr;
+			while ((pPawn = reinterpret_cast<CCSPlayerPawn*>(UTIL_FindEntityByClassname(pPawn, "player"))) != nullptr)
+				if (pPawn->IsPawn() && pPawn->IsAlive())
+					StripPlayer(pPawn);
+		}
+		else if (flags & CGamePlayerEquip::SF_PLAYEREQUIP_ONLYSTRIPSAME)
+		{
+			const auto& pair = s_PlayerEquipMap.find(GetEntityUnique(pEntity));
+			if (pair != s_PlayerEquipMap.end() && !pair->second.empty())
+			{
+				CCSPlayerPawn* pPawn = nullptr;
+				while ((pPawn = reinterpret_cast<CCSPlayerPawn*>(UTIL_FindEntityByClassname(pPawn, "player"))) != nullptr)
+					if (pPawn->IsPawn() && pPawn->IsAlive())
+						StripPlayer(pPawn, pair->second);
+			}
+		}
+	}
+
+	bool TriggerForActivatedPlayer(CGamePlayerEquip* pEntity, InputData_t* pInput)
+	{
+		const auto pCaller = pInput->pActivator;
+		const auto pszWeapon = ((pInput->value.m_type == FIELD_CSTRING || pInput->value.m_type == FIELD_STRING) && pInput->value.m_pszString) ? pInput->value.m_pszString : nullptr;
+
+		if (!pCaller || !pCaller->IsPawn())
+			return true;
+
+		const auto pPawn = reinterpret_cast<CCSPlayerPawn*>(pCaller);
+		const auto flags = pEntity->m_spawnflags();
+
+		if (flags & CGamePlayerEquip::SF_PLAYEREQUIP_STRIPFIRST)
+		{
+			if (!StripPlayer(pPawn))
+				return true;
+		}
+		else if (flags & CGamePlayerEquip::SF_PLAYEREQUIP_ONLYSTRIPSAME)
+		{
+			const auto& pair = s_PlayerEquipMap.find(GetEntityUnique(pEntity));
+			if (pair != s_PlayerEquipMap.end() && !pair->second.empty())
+				StripPlayer(pPawn, pair->second);
+		}
+
+		const auto pItemServices = pPawn->m_pItemServices();
+
+		if (!pItemServices)
+			return true;
+
+		if (pszWeapon && V_strcmp(pszWeapon, "(null)"))
+		{
+			pItemServices->GiveNamedItemAws(pszWeapon);
+			// Don't execute game function (we fixed string param)
+			return false;
+		}
+
+		return true;
+	}
+
+	void OnPrecache(CGamePlayerEquip* pEntity, const CEntityKeyValues* kv)
+	{
+		const auto pHammerId = kv->GetKeyValue("hammerUniqueId");
+		if (!pHammerId)
+			return;
+
+		auto list = std::unordered_set<uint32_t>();
+
+		for (auto i = 0; i < CGamePlayerEquip::MAX_EQUIPMENTS_SIZE; i++)
+		{
+			char key[32];
+			snprintf(key, sizeof(key), "weapon%d", i);
+			const auto val = kv->GetString(key);
+			if (val && strlen(val) > 1)
+			{
+				const auto slot = CCSPlayer_ItemServices::GetItemGearSlot(val);
+				if (slot != GEAR_SLOT_INVALID && slot != GEAR_SLOT_UTILITY)
+					list.emplace(slot);
+			}
+		}
+
+		if (!list.empty())
+		{
+			const auto hEntity = MurmurHash2LowerCase(pHammerId->GetString(), ENTITY_MURMURHASH_SEED);
+			s_PlayerEquipMap[hEntity] = list;
+		}
+	}
+
+	static void Shutdown()
+	{
+		s_PlayerEquipMap.clear();
+	}
+} // namespace CGamePlayerEquipHandler
+
+namespace CGameUIHandler
+{
+	constexpr uint64 BAD_BUTTONS = ~0;
+
+	struct CGameUIState
+	{
+		CHandle<CCSPlayerPawn> m_pPlayer;
+		uint64 m_nButtonState;
+
+		CGameUIState() :
+			m_pPlayer(CBaseHandle()), m_nButtonState(BAD_BUTTONS) {}
+		CGameUIState(const CGameUIState& other) = delete;
+
+		CGameUIState(CCSPlayerPawn* pawn, uint64 buttons) :
+			m_pPlayer(pawn), m_nButtonState(buttons) {}
+
+		[[nodiscard]] CCSPlayerPawn* GetPlayer() const { return m_pPlayer.Get(); }
+
+		void UpdateButtons(uint64 buttons) { m_nButtonState = buttons; }
+	};
+
+	static std::unordered_map<uint32, CGameUIState> s_repository;
+
+	inline uint64 GetButtons(CPlayer_MovementServices* pMovement, int key = 0)
+	{
+		const auto buttonStates = pMovement->m_nButtons().m_pButtonStates();
+		const auto buttons = buttonStates[key];
+		return buttons;
+	}
+
+	inline uint64 GameUIThink(CGameUI* pEntity, CCSPlayerPawn* pPlayer, uint32 lastButtons)
+	{
+		const auto pMovement = pPlayer->m_pMovementServices();
+		if (!pMovement)
+			return BAD_BUTTONS;
+
+		const auto spawnFlags = pEntity->m_spawnflags();
+		const auto buttons = GetButtons(pMovement);
+		const auto scrolls = GetButtons(pMovement, 2);
+
+		if (((spawnFlags & CGameUI::SF_GAMEUI_JUMP_DEACTIVATE) != 0) && ((buttons & IN_JUMP) != 0 || (scrolls & IN_JUMP) != 0))
+		{
+			DelayInput(pEntity, pPlayer, "Deactivate");
+			return BAD_BUTTONS;
+		}
+
+		const auto nButtonsChanged = buttons ^ lastButtons;
+
+		// W
+		if ((nButtonsChanged & IN_FORWARD) != 0)
+			pEntity->AcceptInput("InValue", (lastButtons & IN_FORWARD) != 0 ? "UnpressedForward" : "PressedForward", pPlayer, pEntity);
+
+		// A
+		if ((nButtonsChanged & IN_MOVELEFT) != 0)
+			pEntity->AcceptInput("InValue", (lastButtons & IN_MOVELEFT) != 0 ? "UnpressedMoveLeft" : "PressedMoveLeft", pPlayer, pEntity);
+
+		// S
+		if ((nButtonsChanged & IN_BACK) != 0)
+			pEntity->AcceptInput("InValue", (lastButtons & IN_BACK) != 0 ? "UnpressedBack" : "PressedBack", pPlayer, pEntity);
+
+		// D
+		if ((nButtonsChanged & IN_MOVERIGHT) != 0)
+			pEntity->AcceptInput("InValue", (lastButtons & IN_MOVERIGHT) != 0 ? "UnpressedMoveRight" : "PressedMoveRight", pPlayer, pEntity);
+
+		// Attack
+		if ((nButtonsChanged & IN_ATTACK) != 0)
+			pEntity->AcceptInput("InValue", (lastButtons & IN_ATTACK) != 0 ? "UnpressedAttack" : "PressedAttack", pPlayer, pEntity);
+
+		// Attack2
+		if ((nButtonsChanged & IN_ATTACK2) != 0)
+			pEntity->AcceptInput("InValue", (lastButtons & IN_ATTACK2) != 0 ? "UnpressedAttack2" : "PressedAttack2", pPlayer, pEntity);
+
+		// Speed
+		if ((nButtonsChanged & IN_SPEED) != 0)
+			pEntity->AcceptInput("InValue", (lastButtons & IN_SPEED) != 0 ? "UnpressedSpeed" : "PressedSpeed", pPlayer, pEntity);
+
+		// Duck
+		if ((nButtonsChanged & IN_DUCK) != 0)
+			pEntity->AcceptInput("InValue", (lastButtons & IN_DUCK) != 0 ? "UnpressedDuck" : "PressedDuck", pPlayer, pEntity);
+
+		return buttons;
+	}
+
+	// [Kxnrl]: Must be called on game frame pre, and timer done in post!
+	void RunThink(int tick)
+	{
+		// validate
+		for (auto it = s_repository.begin(); it != s_repository.end();)
+		{
+			const auto entity = CHandle<CGameUI>(it->first).Get();
+			if (!entity)
+			{
+				it = s_repository.erase(it);
+#ifdef ENTITY_HANDLER_ASSERTION
+				Message("Remove Entity %d due to invalid.\n", CBaseHandle(it->first).GetEntryIndex());
+#endif
+			}
+			else
+			{
+				++it;
+			}
+		}
+
+		// think every 4 tick
+		if ((tick & 4) != 0)
+			return;
+
+		for (auto& [key, state] : s_repository)
+		{
+			const auto entity = CHandle<CGameUI>(key).Get();
+			const auto player = state.GetPlayer();
+
+			if (!player || !player->IsPawn())
+			{
+				DelayInput(entity, "Deactivate");
+#ifdef ENTITY_HANDLER_ASSERTION
+				Message("Deactivate Entity %d due to invalid player.\n", entity->entindex());
+#endif
+				continue;
+			}
+
+			if (!player->IsAlive())
+			{
+				DelayInput(entity, player, "Deactivate");
+#ifdef ENTITY_HANDLER_ASSERTION
+				Message("Deactivate Entity %d due to player dead.\n", entity->entindex());
+#endif
+				continue;
+			}
+
+			const auto newButtons = GameUIThink(entity, player, state.m_nButtonState);
+
+			if (newButtons != BAD_BUTTONS)
+				state.UpdateButtons(newButtons);
+		}
+	}
+
+	bool OnActivate(CGameUI* pEntity, CBaseEntity* pActivator)
+	{
+		if (!pActivator || !pActivator->IsPawn())
+			return false;
+
+		const auto pPlayer = reinterpret_cast<CCSPlayerPawn*>(pActivator);
+
+		const auto pMovement = pPlayer->m_pMovementServices();
+		if (!pMovement)
+			return false;
+
+		if ((pEntity->m_spawnflags() & CGameUI::SF_GAMEUI_FREEZE_PLAYER) != 0)
+			pPlayer->m_fFlags(pPlayer->m_fFlags() | FL_ATCONTROLS);
+
+		const CBaseHandle handle = pEntity->GetHandle();
+		const auto key = static_cast<uint>(handle.ToInt());
+
+		DelayInput(pEntity, pPlayer, "InValue", "PlayerOn");
+
+		s_repository[key] = CGameUIState(pPlayer, GetButtons(pMovement) & ~IN_USE);
+
+#ifdef ENTITY_HANDLER_ASSERTION
+		Message("Activate Entity %d<%u> -> %s\n", pEntity->entindex(), key, pPlayer->GetController()->GetPlayerName().c_str());
+#endif
+
+		return true;
+	}
+
+	bool OnDeactivate(CGameUI* pEntity, CBaseEntity* pActivator)
+	{
+		const CBaseHandle handle = CHandle(pEntity);
+		const auto key = static_cast<uint>(handle.ToInt());
+		const auto it = s_repository.find(key);
+
+		if (it == s_repository.end())
+		{
+#ifdef ENTITY_HANDLER_ASSERTION
+			Message("Deactivate Entity %d -> but does not exists <%u>\n", pEntity->entindex(), key);
+#endif
+			return false;
+		}
+
+		if (const auto pPlayer = it->second.GetPlayer())
+		{
+			if ((pEntity->m_spawnflags() & CGameUI::SF_GAMEUI_FREEZE_PLAYER) != 0)
+				pPlayer->m_fFlags(pPlayer->m_fFlags() & ~FL_ATCONTROLS);
+
+			DelayInput(pEntity, pPlayer, "InValue", "PlayerOff");
+
+#ifdef ENTITY_HANDLER_ASSERTION
+			Message("Deactivate Entity %d -> %s\n", pEntity->entindex(), pPlayer->GetController()->GetPlayerName().c_str());
+#endif
+		}
+		else
+		{
+#ifdef ENTITY_HANDLER_ASSERTION
+			Message("Deactivate Entity %d -> nullptr\n", pEntity->entindex());
+#endif
+		}
+
+		s_repository.erase(it);
+
+		return true;
+	}
+
+} // namespace CGameUIHandler
+
+namespace CPointViewControlHandler
+{
+	struct ViewControl
+	{
+		std::vector<CHandle<CCSPlayerPawn>> m_players;
+		std::string m_viewTarget;
+		std::string m_name;
+	};
+
+	static std::unordered_map<uint32, ViewControl> s_repository;
+	static constexpr uint INVALID_FOV = 0xFFFFFFFF;
+	static constexpr uint RESET_FOV = 0xFFFFFFFE;
+	static CHandle<CBaseEntity> INVALID_HANDLE(0xFFFFFFFF);
+
+	inline void UpdatePlayerState(CCSPlayerPawn* pPawn, const CHandle<CBaseEntity>& target, bool frozen, uint fov = INVALID_FOV, bool disarm = false)
+	{
+		if (!pPawn)
+			return;
+
+		if (const auto pCameraService = pPawn->GetCameraService())
+		{
+			pCameraService->m_hViewEntity(target);
+			pCameraService->m_hZoomOwner(INVALID_HANDLE);
+
+			if (fov != INVALID_FOV)
+			{
+				if (const auto pController = pPawn->GetController())
+				{
+					if (fov == RESET_FOV)
+						pCameraService->m_iFOV(pController->m_iDesiredFOV());
+					else
+						pCameraService->m_iFOV(fov);
+				}
+			}
+		}
+
+		if (disarm)
+		{
+			if (const auto pWeaponService = pPawn->m_pWeaponServices())
+			{
+				if (const auto pActiveWeapon = pWeaponService->m_hActiveWeapon().Get())
+					pActiveWeapon->Disarm();
+			}
+		}
+
+		auto flags = pPawn->m_fFlags();
+
+		if (g_pGameRules && g_pGameRules->m_bFreezePeriod())
+			frozen = true;
+
+		if (frozen)
+			flags |= FL_FROZEN;
+		else
+			flags &= ~FL_FROZEN;
+
+		pPawn->m_fFlags(flags);
+	}
+
+	void OnCreated(CBaseEntity* pEntity)
+	{
+		const auto pViewControl = pEntity->AsPointViewControl();
+		if (!pViewControl)
+			return;
+
+		if (!pViewControl->HasTargetCameraEntity())
+		{
+			Warning("PointViewControl %s has no target camera entity\n", pViewControl->GetName());
+			return;
+		}
+
+		ViewControl vc{};
+		vc.m_viewTarget = pViewControl->m_target().String();
+		vc.m_name = pViewControl->GetName();
+		s_repository[pEntity->GetHandle().ToInt()] = vc;
+	}
+	bool OnEnable(CPointViewControl* pEntity, CBaseEntity* pActivator)
+	{
+		if (!pActivator || !pActivator->IsPawn() || !pActivator->IsAlive())
+			return false;
+
+		const auto key = pEntity->GetHandle().ToInt();
+		const auto it = s_repository.find(key);
+		if (it == s_repository.end())
+			return false;
+
+		const auto pPawn = reinterpret_cast<CCSPlayerPawn*>(pActivator);
+		const auto pController = reinterpret_cast<CCSPlayerController*>(pPawn->GetController());
+		if (!pController)
+			return false;
+
+		if (pController->IsBot() || pController->m_bIsHLTV())
+		{
+			Warning("PointViewControl %s try enable for bot or HLTV: %s\n", it->second.m_name.c_str(), pController->GetPlayerName().c_str());
+			return false;
+		}
+
+		const auto handle = CHandle<CCSPlayerPawn>(pPawn->GetHandle());
+
+		for (auto& [vk, vc] : s_repository)
+		{
+			const auto iterator = std::find(vc.m_players.begin(), vc.m_players.end(), handle);
+			if (iterator != vc.m_players.end())
+			{
+				if (vk == static_cast<uint>(key))
+				{
+					Warning("PointViewControl %s was enabled twice in a row! player: %s\n", vc.m_name.c_str(), pController->GetPlayerName().c_str());
+					return false;
+				}
+
+				vc.m_players.erase(iterator);
+				UpdatePlayerState(pPawn, INVALID_HANDLE, false, RESET_FOV);
+				Warning("PointViewControl %s already enabled for %s\n", vc.m_name.c_str(), pController->GetPlayerName().c_str());
+				break;
+			}
+		}
+
+		it->second.m_players.push_back(handle);
+		return true;
+	}
+	bool OnDisable(CPointViewControl* pEntity, CBaseEntity* pActivator)
+	{
+		if (!pActivator || !pActivator->IsPawn() || !pActivator->IsAlive())
+			return false;
+
+		const auto key = pEntity->GetHandle().ToInt();
+		const auto it = s_repository.find(key);
+		if (it == s_repository.end())
+			return false;
+
+		const auto pPawn = reinterpret_cast<CCSPlayerPawn*>(pActivator);
+		const auto pController = reinterpret_cast<CCSPlayerController*>(pPawn->GetController());
+		if (!pController)
+			return false;
+
+		if (pController->IsBot() || pController->m_bIsHLTV())
+		{
+			Warning("PointViewControl %s try disable for bot or HLTV: %s\n", it->second.m_name.c_str(), pController->GetPlayerName().c_str());
+			return false;
+		}
+
+		const auto handle = CHandle<CCSPlayerPawn>(pPawn->GetHandle());
+
+		UpdatePlayerState(pPawn, INVALID_HANDLE, false, RESET_FOV);
+
+		auto& vecPlayers = it->second.m_players;
+		auto iterator = std::find(vecPlayers.begin(), vecPlayers.end(), handle);
+
+		if (iterator == vecPlayers.end())
+			return false;
+
+		vecPlayers.erase(iterator);
+		return true;
+	}
+	bool OnEnableAll(CPointViewControl* pEntity)
+	{
+		const auto key = pEntity->GetHandle().ToInt();
+		const auto it = s_repository.find(key);
+		if (it == s_repository.end() || !GetGlobals())
+			return false;
+
+		for (auto i = 0; i < GetGlobals()->maxClients; i++)
+		{
+			const auto pController = CCSPlayerController::FromSlot(i);
+			if (!pController || !pController->IsConnected() || pController->IsBot() || pController->m_bIsHLTV())
+				continue;
+
+			const auto pPawn = pController->GetPlayerPawn();
+			if (!pPawn || !pPawn->IsAlive())
+				continue;
+
+			const auto handle = CHandle<CCSPlayerPawn>(pPawn->GetHandle());
+
+			for (auto& [vk, vc] : s_repository)
+			{
+				auto iterator = std::find(vc.m_players.begin(), vc.m_players.end(), handle);
+
+				if (iterator != vc.m_players.end())
+				{
+					vc.m_players.erase(iterator);
+					if (vk == static_cast<uint>(key))
+						continue;
+					UpdatePlayerState(pPawn, INVALID_HANDLE, false, RESET_FOV);
+					Warning("PointViewControl %s already enabled for %s\n", vc.m_name.c_str(), pController->GetPlayerName().c_str());
+				}
+			}
+
+			it->second.m_players.push_back(handle);
+		}
+
+		return true;
+	}
+	bool OnDisableAll(CPointViewControl* pEntity)
+	{
+		const auto key = pEntity->GetHandle().ToInt();
+		const auto it = s_repository.find(key);
+		if (it == s_repository.end())
+			return false;
+
+		for (auto hPawn : it->second.m_players)
+			if (CCSPlayerPawn* player = hPawn.Get())
+				UpdatePlayerState(player, INVALID_HANDLE, false, RESET_FOV);
+
+		it->second.m_players.clear();
+
+		return true;
+	}
+
+	void RunThink(int tick)
+	{
+		// validate
+		for (auto it = s_repository.begin(); it != s_repository.end();)
+		{
+			const auto entity = CHandle<CPointViewControl>(it->first).Get();
+			if (!entity)
+			{
+				for (auto hPawn : it->second.m_players)
+					if (CCSPlayerPawn* player = hPawn.Get())
+						UpdatePlayerState(player, INVALID_HANDLE, false, RESET_FOV);
+
+				it = s_repository.erase(it);
+			}
+			else
+			{
+				++it;
+			}
+		}
+
+		// think every tick
+
+		for (auto& [vk, vc] : s_repository)
+		{
+			const auto entity = CHandle<CPointViewControl>(vk).Get();
+			if (!entity)
+			{
+				Error("Why invalid entity here?");
+				continue;
+			}
+
+			if (vc.m_players.empty())
+				continue;
+
+			const auto pTarget = entity->GetTargetCameraEntity();
+			if (!pTarget)
+			{
+				for (auto hPawn : vc.m_players)
+					if (CCSPlayerPawn* player = hPawn.Get())
+						UpdatePlayerState(player, INVALID_HANDLE, false, RESET_FOV);
+				vc.m_players.clear();
+				continue;
+			}
+
+			for (auto iterator = vc.m_players.begin(); iterator != vc.m_players.end();)
+			{
+				auto hPawn = *iterator;
+				CCSPlayerPawn* player = hPawn.Get();
+				if (!player)
+				{
+					iterator = vc.m_players.erase(iterator);
+					continue;
+				}
+				if (!player->IsAlive())
+				{
+					UpdatePlayerState(player, INVALID_HANDLE, false, RESET_FOV);
+					iterator = vc.m_players.erase(iterator);
+					continue;
+				}
+
+				UpdatePlayerState(player, pTarget->GetHandle(), entity->HasFrozen(), entity->HasFOV() ? entity->GetFOV() : INVALID_FOV, entity->HasDisarm());
+				iterator++;
+			}
+		}
+	}
+	bool IsViewControl(CCSPlayerPawn* pPawn)
+	{
+		for (const auto& [vk, vc] : s_repository)
+		{
+			for (auto hPawn : vc.m_players)
+				if (hPawn == pPawn->GetHandle())
+					return true;
+		}
+		return false;
+	}
+	void Shutdown()
+	{
+		for (auto& [vk, vc] : s_repository)
+		{
+			for (auto hPawn : vc.m_players)
+				if (CCSPlayerPawn* player = hPawn.Get())
+					UpdatePlayerState(player, INVALID_HANDLE, false, RESET_FOV);
+			vc.m_players.clear();
+		}
+		s_repository.clear();
+	}
+} // namespace CPointViewControlHandler
+
+void EntityHandler_OnGameFramePre(bool simulate, int tick)
+{
+	if (!simulate)
+		return;
+
+	CGameUIHandler::RunThink(tick);
+	CPointViewControlHandler::RunThink(tick);
+}
+
+void EntityHandler_OnGameFramePost(bool simulate, int tick)
+{
+	if (!simulate)
+		return;
+}
+
+void EntityHandler_OnRoundRestart()
+{
+	CPointViewControlHandler::Shutdown();
+}
+
+void EntityHandler_OnEntitySpawned(CBaseEntity* pEntity)
+{
+	CPointViewControlHandler::OnCreated(pEntity);
+}
+
+void EntityHandler_OnLevelInit()
+{
+	CTriggerGravityHandler::Shutdown();
+	CGamePlayerEquipHandler::Shutdown();
+}

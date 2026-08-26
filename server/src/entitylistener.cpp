@@ -1,0 +1,68 @@
+/**
+ * =============================================================================
+ * CS2Fixes
+ * Copyright (C) 2023-2026 Source2ZE
+ * =============================================================================
+ *
+ * This program is free software; you can redistribute it and/or modify it under
+ * the terms of the GNU General Public License, version 3.0, as published by the
+ * Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ * details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "entitylistener.h"
+#include "common.h"
+#include "cs2_sdk/entity/cbaseentity.h"
+#include "cs2fixes.h"
+#include "entities.h"
+#include "entity/cgamerules.h"
+#include "entityclass.h"
+#include "entwatch.h"
+#include "gameconfig.h"
+#include "mapmigrations.h"
+#include "plat.h"
+
+CEntityListener* g_pEntityListener = nullptr;
+
+CConVar<bool> g_cvarGrenadeNoBlock("cs2f_noblock_grenades", FCVAR_NONE, "Whether to use noblock on grenade projectiles", false);
+
+void CEntityListener::OnEntitySpawned(CEntityInstance* pEntity)
+{
+#ifdef _DEBUG
+	const char* pszClassName = pEntity->m_pEntity->m_designerName.String();
+	Message("Entity spawned: %s %s\n", pszClassName, ((CBaseEntity*)pEntity)->m_sUniqueHammerID().Get());
+#endif
+
+	if (g_cvarGrenadeNoBlock.Get() && V_stristr(pEntity->GetClassname(), "_projectile"))
+		reinterpret_cast<CBaseEntity*>(pEntity)->SetCollisionGroup(COLLISION_GROUP_DEBRIS);
+
+	EntityHandler_OnEntitySpawned(reinterpret_cast<CBaseEntity*>(pEntity));
+	g_pMapMigrations->OnEntitySpawned_Post(reinterpret_cast<CBaseEntity*>(pEntity));
+
+	if (g_cvarEnableEntWatch.Get())
+		EW_OnEntitySpawned(pEntity);
+}
+
+void CEntityListener::OnEntityCreated(CEntityInstance* pEntity)
+{
+	ExecuteOnce(addresses::UTIL_Remove = pEntity->m_pEntity->m_pClass->m_NameToThinkFunc("CBaseEntitySUB_Remove"));
+
+	if (!V_strcmp("cs_gamerules", pEntity->GetClassname()))
+		g_pGameRules = ((CCSGameRulesProxy*)pEntity)->m_pGameRules;
+}
+
+void CEntityListener::OnEntityDeleted(CEntityInstance* pEntity)
+{
+	EW_OnEntityDeleted(pEntity);
+}
+
+void CEntityListener::OnEntityParentChanged(CEntityInstance* pEntity, CEntityInstance* pNewParent)
+{
+}
