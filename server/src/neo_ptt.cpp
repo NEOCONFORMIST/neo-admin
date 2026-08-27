@@ -7,6 +7,7 @@
 #include "neo_admin_permissions.h"
 #include "neo_admin_operations.h"
 #include "neo_admin_persistence.h"
+#include "neo_admin_transport.h"
 #include "voicebridge_protocol.h"
 
 #include <algorithm>
@@ -62,6 +63,7 @@ namespace
     std::string g_operations_path;
     NeoPttStats g_stats{};
     std::uint32_t g_server_sequence = 0;
+    std::string g_build_id = "development";
 
     constexpr std::size_t kMaxPendingPttFrames = 128;
     std::deque<NeoPttFrame> g_pending_frames{};
@@ -412,22 +414,16 @@ namespace
         return 5;
     }
 
-    bool SendPacketTo(
+    bool QueuePacketTo(
         const sockaddr_storage& destination,
         socklen_t destination_length,
-        const std::vector<std::uint8_t>& packet)
+        const voicebridge::VoicePacketData& data,
+        std::span<const std::uint8_t> secret)
     {
-        if (g_socket < 0 || packet.empty())
+        if (g_socket < 0 || secret.empty())
             return false;
-
-        const ssize_t sent = ::sendto(
-            g_socket,
-            packet.data(),
-            packet.size(),
-            MSG_DONTWAIT,
-            reinterpret_cast<const sockaddr*>(&destination),
-            destination_length);
-        return sent == static_cast<ssize_t>(packet.size());
+        return neo_admin::transport::Enqueue(
+            destination, destination_length, data, secret);
     }
 
     bool SendAdminSession(
@@ -454,10 +450,35 @@ namespace
                 message.size()),
         };
 
-        return SendPacketTo(
+        return QueuePacketTo(
             destination,
             destination_length,
-            voicebridge::BuildAuthenticatedVoicePacket(data, account_secret));
+            data,
+            account_secret);
+    }
+
+    bool SendServerCapabilities(const AdminSessionState& session)
+    {
+        constexpr std::string_view features =
+            "multi_session,player_state_delta,async_outbound,server_health,"
+            "map_overview,voice_relay,sqlite,fail_soft_compatibility";
+        const voicebridge::VoicePacketData data{
+            .message_type = voicebridge::kMessageServerCapabilities,
+            .sequence = ++g_server_sequence,
+            .tick = voicebridge::kProtocolMajor,
+            .steam_id = voicebridge::kServerCapabilities,
+            .player_slot = -1,
+            .sample_rate = voicebridge::kProtocolMinor,
+            .player_name = g_build_id,
+            .payload = std::span<const std::uint8_t>(
+                reinterpret_cast<const std::uint8_t*>(features.data()),
+                features.size()),
+        };
+        return QueuePacketTo(
+            session.endpoint,
+            session.endpoint_length,
+            data,
+            session.secret);
     }
 
     neo_admin::Permission PermissionForAction(std::uint32_t action)
@@ -482,6 +503,7 @@ namespace
             case 49:
             case 50:
             case 51:
+            case 52:
                 return neo_admin::Permission::ViewDashboard;
             case 100:
             case 101:
@@ -780,11 +802,26 @@ bool NeoPtt_Start()
     g_socket = sock;
     g_port = kDefaultPttPort;
 
+    if (!neo_admin::transport::Start(g_socket))
+    {
+        std::snprintf(
+            g_error,
+            sizeof(g_error),
+            "could not start the outbound transport worker");
+        ::close(g_socket);
+        g_socket = -1;
+        g_port = 0;
+        ClearSensitiveBytes(g_secret);
+        neo_admin::CloseDatabase();
+        return false;
+    }
+
     return true;
 }
 
 void NeoPtt_Shutdown()
 {
+    neo_admin::transport::Stop();
     if (g_socket >= 0)
     {
         ::close(g_socket);
@@ -863,12 +900,11 @@ bool NeoPtt_SendVoicePacket(
             continue;
         }
 
-        const std::vector<std::uint8_t> packet =
-            voicebridge::BuildAuthenticatedVoicePacket(data, session.secret);
-        sent_any = SendPacketTo(
+        sent_any = QueuePacketTo(
             session.endpoint,
             session.endpoint_length,
-            packet) || sent_any;
+            data,
+            session.secret) || sent_any;
         ++index;
     }
     return sent_any;
@@ -887,10 +923,11 @@ bool NeoPtt_SendVoicePacketTo(
         return false;
     }
 
-    return SendPacketTo(
+    return QueuePacketTo(
         session->endpoint,
         session->endpoint_length,
-        voicebridge::BuildAuthenticatedVoicePacket(data, session->secret));
+        data,
+        session->secret);
 }
 
 std::uint64_t NeoPtt_Poll()
@@ -1179,6 +1216,26 @@ std::uint64_t NeoPtt_Poll()
             session->last_admin_action_time =
                 admin_action.unix_time;
             session->activity_order = ++g_session_activity_order;
+
+            if (admin_action.action ==
+                static_cast<std::uint32_t>(
+                    voicebridge::AdminActionCode::RequestCapabilities))
+            {
+                if (neo_admin::HasPermission(
+                        session->permissions,
+                        neo_admin::Permission::ViewDashboard))
+                {
+                    (void)SendServerCapabilities(*session);
+                    ++g_stats.authenticated;
+                    g_stats.last_sequence = admin_action.sequence;
+                    ++accepted_this_poll;
+                }
+                else
+                {
+                    ++g_stats.rejected;
+                }
+                continue;
+            }
 
             if (g_pending_admin_actions.size() >=
                 kMaxPendingAdminActions)
@@ -1880,5 +1937,21 @@ bool NeoPtt_DeleteAdminAccount(
 
 NeoPttStats NeoPtt_GetStats()
 {
-    return g_stats;
+    NeoPttStats stats = g_stats;
+    const neo_admin::transport::Stats outbound =
+        neo_admin::transport::GetStats();
+    stats.outbound_queued = outbound.queued;
+    stats.outbound_sent = outbound.sent;
+    stats.outbound_dropped = outbound.dropped;
+    stats.outbound_coalesced = outbound.coalesced;
+    return stats;
+}
+
+void NeoPtt_SetBuildId(std::string_view build_id)
+{
+    g_build_id.assign(build_id.begin(), build_id.end());
+    if (g_build_id.empty())
+        g_build_id = "development";
+    if (g_build_id.size() > 64)
+        g_build_id.resize(64);
 }

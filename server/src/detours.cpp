@@ -22,6 +22,7 @@
 #include "usercmd.pb.h"
 
 #include "addresses.h"
+#include "neo_admin_compatibility.h"
 #include "buttonwatch.h"
 #include "cdetour.h"
 #include "commands.h"
@@ -1079,6 +1080,8 @@ void FASTCALL Detour_GameSystem_Think_CheckSteamBan()
 	VoiceBridge_OnGameSystemThink();
 
 	if (!g_cvarFixGameBans.Get())
+		return;
+	if (!NeoAdminCompatibility_CanCleanGameBans())
 		return;
 
 	CUtlMap<uint32, CGcBanInformation_t, uint32>* pMap = addresses::sm_mapGcBanInformation;

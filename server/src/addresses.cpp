@@ -72,7 +72,14 @@ bool addresses::Initialize(CGameConfig* g_GameConfig)
 	RESOLVE_SIG(g_GameConfig, "GetSpawnGroups", addresses::GetSpawnGroups);
 	RESOLVE_SIG(g_GameConfig, "CBasePlayerPawn_SnapViewAngles", addresses::CBasePlayerPawn_SnapViewAngles);
 
-	return InitializeBanMap(g_GameConfig);
+	if (!InitializeBanMap(g_GameConfig))
+	{
+		Message(
+			"[NEO ADMIN] Optional game-ban cleanup signature is unavailable; "
+			"that feature is disabled.\n");
+	}
+
+	return true;
 }
 
 bool addresses::InitializeBanMap(CGameConfig* g_GameConfig)

@@ -62,6 +62,34 @@ constexpr std::uint8_t kMessageAnnouncementCatalog = 24;
 constexpr std::uint8_t kMessageGameAdminCatalog = 25;
 constexpr std::uint8_t kMessageMapOverviewChunk = 26;
 
+// Backward-compatible protocol negotiation. The CVB1 wire-header version
+// remains 1; this authenticated server packet advertises additive features.
+constexpr std::uint8_t kMessageServerCapabilities = 27;
+constexpr std::uint32_t kProtocolMajor = 1;
+constexpr std::uint32_t kProtocolMinor = 1;
+
+enum ServerCapability : std::uint64_t
+{
+    kCapabilityMultiSession = 1ULL << 0,
+    kCapabilityPlayerStateDelta = 1ULL << 1,
+    kCapabilityAsyncOutbound = 1ULL << 2,
+    kCapabilityServerHealth = 1ULL << 3,
+    kCapabilityMapOverview = 1ULL << 4,
+    kCapabilityVoiceRelay = 1ULL << 5,
+    kCapabilitySqlitePersistence = 1ULL << 6,
+    kCapabilityFailSoftCompatibility = 1ULL << 7,
+};
+
+constexpr std::uint64_t kServerCapabilities =
+    kCapabilityMultiSession |
+    kCapabilityPlayerStateDelta |
+    kCapabilityAsyncOutbound |
+    kCapabilityServerHealth |
+    kCapabilityMapOverview |
+    kCapabilityVoiceRelay |
+    kCapabilitySqlitePersistence |
+    kCapabilityFailSoftCompatibility;
+
 enum class AdminActionCode : std::uint32_t
 {
     None = 0,
@@ -105,6 +133,7 @@ enum class AdminActionCode : std::uint32_t
     // Request an authenticated server health snapshot.
     RequestServerHealth = 50,
     RequestMapOverview = 51,
+    RequestCapabilities = 52,
 
     RequestAdminAccounts = 100,
     SaveAdminAccount = 101,

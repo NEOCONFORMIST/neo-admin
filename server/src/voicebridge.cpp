@@ -265,6 +265,8 @@ void VoiceBridge::Shutdown()
     std::scoped_lock lock(presence_mutex_);
     for (PlayerPresence& player : players_)
         player = {};
+    for (PlayerPositionState& position : player_positions_)
+        position = {};
     current_map_.clear();
 }
 
@@ -301,6 +303,7 @@ void VoiceBridge::ForgetPlayer(std::int32_t player_slot)
 
     std::scoped_lock lock(presence_mutex_);
     players_[static_cast<std::size_t>(player_slot)] = {};
+    player_positions_[static_cast<std::size_t>(player_slot)] = {};
 }
 
 bool VoiceBridge::SendVoice(
@@ -851,6 +854,8 @@ void VoiceBridge::SetCurrentMap(const char* map_name)
             if (player.player_name != "SourceTV")
                 player = {};
         }
+        for (PlayerPositionState& position : player_positions_)
+            position = {};
     }
 
     if (!normalized.empty())
@@ -929,6 +934,37 @@ bool VoiceBridge::SendPlayerPosition(
     if (bot)
         flags |= 0x02U;
 
+    const auto now = std::chrono::steady_clock::now();
+    const std::string_view name = player_name
+        ? std::string_view(player_name)
+        : std::string_view();
+    const bool tracked_slot =
+        player_slot >= 0 &&
+        static_cast<std::size_t>(player_slot) < player_positions_.size();
+    if (tracked_slot)
+    {
+        std::scoped_lock lock(presence_mutex_);
+        const PlayerPositionState& previous =
+            player_positions_[static_cast<std::size_t>(player_slot)];
+        const bool identity_or_status_changed =
+            !previous.valid ||
+            previous.steam_id != steam_id ||
+            previous.team != team ||
+            previous.health != health ||
+            previous.flags != flags ||
+            previous.player_name != name;
+        const bool moved =
+            std::fabs(previous.x - x) >= 0.5f ||
+            std::fabs(previous.y - y) >= 0.5f ||
+            std::fabs(previous.z - z) >= 0.5f ||
+            std::fabs(previous.yaw - yaw) >= 1.0f;
+        const bool heartbeat_due =
+            !previous.valid ||
+            now - previous.sent_at >= std::chrono::seconds(1);
+        if (!identity_or_status_changed && !moved && !heartbeat_due)
+            return true;
+    }
+
     const voicebridge::VoicePacketData data{
         .message_type = voicebridge::kMessagePlayerPosition,
         .audio_format = 0,
@@ -943,14 +979,30 @@ bool VoiceBridge::SendPlayerPosition(
         .uncompressed_sample_offset = FloatBits(yaw),
         .num_packets = static_cast<std::uint32_t>(team),
         .voice_level = static_cast<float>(health),
-        .player_name = player_name
-            ? std::string_view(player_name)
-            : std::string_view(),
+        .player_name = name,
         .packet_offsets = {},
         .payload = {},
     };
 
-    return SendPacket(data);
+    const bool queued = SendPacket(data);
+    if (queued && tracked_slot)
+    {
+        std::scoped_lock lock(presence_mutex_);
+        PlayerPositionState& current =
+            player_positions_[static_cast<std::size_t>(player_slot)];
+        current.valid = true;
+        current.steam_id = steam_id;
+        current.x = x;
+        current.y = y;
+        current.z = z;
+        current.yaw = yaw;
+        current.team = team;
+        current.health = health;
+        current.flags = flags;
+        current.player_name.assign(name.begin(), name.end());
+        current.sent_at = now;
+    }
+    return queued;
 #endif
 }
 

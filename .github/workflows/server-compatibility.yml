@@ -1,0 +1,73 @@
+name: Server compatibility
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/**"
+      - "tests/**"
+      - "scripts/package_standalone_server_plugin.ps1"
+      - ".github/workflows/server-compatibility.yml"
+  pull_request:
+    paths:
+      - "server/**"
+      - "tests/**"
+      - "scripts/package_standalone_server_plugin.ps1"
+      - ".github/workflows/server-compatibility.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  steam-runtime-3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source and SDK submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build plugin in Steam Runtime 3
+        working-directory: server
+        run: docker compose run --rm --build cs2fixes-build
+
+      - name: Run protocol, threading, and compatibility gates
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --volume "$GITHUB_WORKSPACE/server:/server:ro" \
+            --workdir /workspace \
+            ambuilder \
+            bash -lc "mkdir -p tests/.build && clang++ -std=c++20 -Wall -Wextra -Werror -pthread -I/server/src /server/src/voicebridge_protocol.cpp /server/src/neo_admin_transport.cpp tests/transport_queue_test.cpp -o tests/.build/transport_queue_test && tests/.build/transport_queue_test"
+          python tests/engineering_compatibility_test.py --server-source server
+
+      - name: Verify ELF security properties
+        run: |
+          plugin=server/dockerbuild/package/cs2/addons/cs2fixes/bin/linuxsteamrt64/cs2fixes.so
+          test -s "$plugin"
+          readelf -W -l "$plugin" | grep GNU_STACK | tee /tmp/gnu-stack.txt
+          ! grep -q 'GNU_STACK.*RWE' /tmp/gnu-stack.txt
+
+      - name: Build standalone Metamod package
+        shell: pwsh
+        run: >-
+          ./scripts/package_standalone_server_plugin.ps1
+          -SourcePackage ./server/dockerbuild/package/cs2
+          -Destination ./dist/server-package/neo-admin
+
+      - name: Check coexistence package
+        run: |
+          test -f dist/server-package/neo-admin/addons/metamod/neo_admin.vdf
+          test -f dist/server-package/neo-admin/addons/neo_admin/bin/linuxsteamrt64/neo_admin.so
+          test ! -e dist/server-package/neo-admin/addons/metamod/cs2fixes.vdf
+          test ! -e dist/server-package/neo-admin/addons/cs2fixes/bin/linuxsteamrt64/cs2fixes.so
+          test ! -e dist/server-package/neo-admin/addons/counterstrikesharp
+          test ! -e dist/server-package/neo-admin/addons/metamod/bin
+
+      - name: Upload tested server package
+        uses: actions/upload-artifact@v4
+        with:
+          name: neo-admin-server-steamrt3
+          path: dist/server-package/neo-admin

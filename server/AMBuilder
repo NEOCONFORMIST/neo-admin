@@ -43,12 +43,13 @@ for sdk_target in MMSPlugin.sdk_targets:
     ]
     binary.sources += ['src/utils/plat_win.cpp']
 
-  binary.sources += [
-    'src/cs2fixes.cpp',
+  neo_admin_sources = [
     'src/voicebridge.cpp',
     'src/voicebridge_protocol.cpp',
     'src/neo_map_overview_assets.cpp',
     'src/neo_ptt.cpp',
+    'src/neo_admin_transport.cpp',
+    'src/neo_admin_compatibility.cpp',
     'src/neo_admin_persistence.cpp',
     'src/neo_admin_accounts.cpp',
     'src/neo_admin_game_admins.cpp',
@@ -57,6 +58,13 @@ for sdk_target in MMSPlugin.sdk_targets:
     'src/neo_admin_discipline.cpp',
     'src/neo_admin_operations.cpp',
     'src/neo_admin_menu.cpp',
+  ]
+
+  # The legacy compatibility core remains a separate list while NEO ADMIN is
+  # extracted into its own Metamod entry point. Keeping the boundary explicit
+  # prevents new remote-admin code from leaking into unrelated CS2Fixes files.
+  compatibility_sources = [
+    'src/cs2fixes.cpp',
     'src/mempatch.cpp',
     'src/patches.cpp',
     'src/cvars.cpp',
@@ -97,6 +105,8 @@ for sdk_target in MMSPlugin.sdk_targets:
     'sdk/tier1/keyvalues3.cpp',
     'vendor/sqlite/sqlite3.c',
   ]
+
+  binary.sources += neo_admin_sources + compatibility_sources
 
   protoc_builder = builder.tools.Protoc(protoc = sdk_target.protoc, sources = [
     os.path.join(sdk['path'], 'common', 'valveextensions.proto'),

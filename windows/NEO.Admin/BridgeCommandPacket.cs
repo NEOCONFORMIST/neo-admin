@@ -38,6 +38,10 @@ internal enum AdminActionCode : uint
 
     // Request one authenticated chunk of a server-hosted map overview.
     RequestMapOverview = 51,
+
+    // Additive protocol negotiation. Servers predating this request may
+    // reject it without affecting the authenticated session.
+    RequestCapabilities = 52,
     RequestAdminAccounts = 100,
     SaveAdminAccount = 101,
     DeleteAdminAccount = 102,

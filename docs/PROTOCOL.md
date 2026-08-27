@@ -1,4 +1,4 @@
-# CS2 VoiceBridge protocol v1
+# NEO ADMIN protocol 1.1
 
 Transport is one authenticated UDP datagram per captured CS2 voice message.
 All integer and floating-point fields are little-endian.
@@ -33,3 +33,25 @@ All integer and floating-point fields are little-endian.
 The HMAC key is the UTF-8 value of `VOICEBRIDGE_SECRET` / `SharedSecret`.
 HMAC authenticates packets but does not encrypt their contents. Use a VPN such as
 WireGuard or Tailscale when the server and listener communicate over the public Internet.
+
+## Compatibility negotiation
+
+The fixed wire-header version remains `1`. After an administrator session is
+authenticated, current clients send admin action `52` (`RequestCapabilities`).
+Current servers reply with message type `27` (`ServerCapabilities`):
+
+| Packet field | Meaning |
+|---|---|
+| `tick` | protocol major version |
+| `sample_rate` | protocol minor version |
+| `steam_id` | 64-bit capability flags |
+| `player_name` | server build ID |
+| `payload` | comma-separated capability names |
+
+The currently advertised flags are multi-session support, player-state deltas,
+asynchronous outbound transport, server health, map overviews, voice relay,
+SQLite persistence, and fail-soft engine compatibility. Older clients never
+request the message, so they continue to receive only protocol types they know.
+
+New wire behavior must be additive, must have a capability flag, and must remain
+optional until the client confirms that capability.

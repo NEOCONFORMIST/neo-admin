@@ -25,6 +25,7 @@ internal enum BridgeMessageType : byte
     AnnouncementCatalog = 24,
     GameAdminCatalog = 25,
     MapOverviewChunk = 26,
+    ServerCapabilities = 27,
 }
 
 internal enum VoiceAudioFormat : byte
@@ -66,6 +67,21 @@ internal sealed record VoicePacket(
     public string ChatMessage => MessageType == BridgeMessageType.ChatEvent
         ? Encoding.UTF8.GetString(Payload)
         : string.Empty;
+
+    public uint ProtocolMajor =>
+        MessageType == BridgeMessageType.ServerCapabilities ? Tick : 0;
+    public uint ProtocolMinor =>
+        MessageType == BridgeMessageType.ServerCapabilities ? SampleRate : 0;
+    public ulong ServerCapabilityFlags =>
+        MessageType == BridgeMessageType.ServerCapabilities ? SteamId : 0;
+    public string ServerBuildId =>
+        MessageType == BridgeMessageType.ServerCapabilities
+            ? PlayerName
+            : string.Empty;
+    public string ServerCapabilityList =>
+        MessageType == BridgeMessageType.ServerCapabilities
+            ? Encoding.UTF8.GetString(Payload)
+            : string.Empty;
 
     // NEO ADMIN CONTROL Stage 3T server response.
     // The server echoes the originating request sequence in Tick,
@@ -267,7 +283,8 @@ internal sealed record VoicePacket(
                 BridgeMessageType.MapRotationCatalog or
                 BridgeMessageType.AnnouncementCatalog or
                 BridgeMessageType.GameAdminCatalog or
-                BridgeMessageType.MapOverviewChunk))
+                BridgeMessageType.MapOverviewChunk or
+                BridgeMessageType.ServerCapabilities))
         {
             error =
                 $"Unsupported protocol version/type: {version}/{(byte)messageType}.";
@@ -378,6 +395,18 @@ internal sealed record VoicePacket(
             {
                 error =
                     "A server-health packet contains invalid payload metadata.";
+                return false;
+            }
+        }
+        else if (messageType == BridgeMessageType.ServerCapabilities)
+        {
+            if (nameLength is < 1 or > 64 ||
+                offsetCount != 0 ||
+                payloadLength is < 1 or > 512 ||
+                tick == 0 || sampleRate > 1000 ||
+                playerSlot != -1)
+            {
+                error = "A server-capabilities packet is invalid.";
                 return false;
             }
         }

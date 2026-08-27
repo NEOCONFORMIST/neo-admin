@@ -143,6 +143,21 @@ private:
         std::string player_name;
     };
 
+    struct PlayerPositionState
+    {
+        bool valid = false;
+        std::uint64_t steam_id = 0;
+        float x = 0.0f;
+        float y = 0.0f;
+        float z = 0.0f;
+        float yaw = 0.0f;
+        std::int32_t team = 0;
+        std::int32_t health = 0;
+        std::uint8_t flags = 0;
+        std::string player_name;
+        std::chrono::steady_clock::time_point sent_at{};
+    };
+
     void RememberPlayer(
         std::uint64_t steam_id,
         std::int32_t player_slot,
@@ -176,6 +191,7 @@ private:
 
     std::mutex presence_mutex_;
     std::array<PlayerPresence, kTrackedPlayerSlots> players_{};
+    std::array<PlayerPositionState, kTrackedPlayerSlots> player_positions_{};
     std::string current_map_;
     std::chrono::steady_clock::time_point next_presence_broadcast_{};
     std::chrono::steady_clock::time_point next_position_frame_{};

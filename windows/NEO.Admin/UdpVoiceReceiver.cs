@@ -34,6 +34,7 @@ internal sealed class UdpVoiceReceiver : IAsyncDisposable
     private readonly CancellationTokenSource _stop = new();
     private Task? _receiveTask;
     private volatile AdminSession? _currentSession;
+    private volatile VoicePacket? _serverCapabilities;
 
     public event Action<VoicePacket, IPEndPoint>? PacketReceived;
     public event Action<string>? StatusChanged;
@@ -53,6 +54,7 @@ internal sealed class UdpVoiceReceiver : IAsyncDisposable
         _pttEndpoint is not null;
 
     public AdminSession? CurrentSession => _currentSession;
+    public VoicePacket? ServerCapabilities => _serverCapabilities;
     public string CurrentAdminId => _adminId;
     public bool HasAdminCredentials =>
         _secret.Length >= 16 &&
@@ -104,6 +106,7 @@ internal sealed class UdpVoiceReceiver : IAsyncDisposable
         // the next CONNECT before teleport is allowed.
         _serverEndpoint = null;
         _currentSession = null;
+        _serverCapabilities = null;
         ResetHealthTracking();
 
         AdminSessionChanged?.Invoke(null);
@@ -290,6 +293,7 @@ internal sealed class UdpVoiceReceiver : IAsyncDisposable
                 continue;
             }
 
+            bool requestCapabilities = false;
             if (packet!.MessageType == BridgeMessageType.AdminSession)
             {
                 var session = new AdminSession(
@@ -310,7 +314,11 @@ internal sealed class UdpVoiceReceiver : IAsyncDisposable
                     StatusChanged?.Invoke(session.Message);
                     continue;
                 }
+                requestCapabilities = true;
             }
+
+            if (packet.MessageType == BridgeMessageType.ServerCapabilities)
+                _serverCapabilities = packet;
 
             // The CS2 server uses the same UDP socket for outbound status/voice
             // and inbound authenticated admin commands. Reply to the exact
@@ -318,6 +326,13 @@ internal sealed class UdpVoiceReceiver : IAsyncDisposable
             _serverEndpoint = new IPEndPoint(
                 received.RemoteEndPoint.Address,
                 received.RemoteEndPoint.Port);
+
+            if (requestCapabilities)
+            {
+                _ = SendAdminActionAsync(
+                    AdminActionCode.RequestCapabilities,
+                    -1);
+            }
 
             VoicePacket acceptedPacket =
                 AddTransportMetrics(packet);

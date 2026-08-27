@@ -119,9 +119,9 @@ class MMSPluginConfig(object):
       'name': 'cs2fixes',
       'alias': 'cs2fixes',
       'display_name': 'NEO ADMIN',
-      'description': 'A Metamod plugin with fixes and features aimed but not limited to zombie escape',
-      'author': 'xen, Poggu, Vauff, Ice, lonefang, Kxnrl, tilgep, EasterLee and various contributors',
-      'url': 'https://github.com/Source2ZE/CS2Fixes',
+      'description': 'NEO ADMIN remote monitoring and administration for Counter-Strike 2, with a transitional CS2Fixes compatibility core',
+      'author': 'NEOCONFORMIST and the CS2Fixes contributors',
+      'url': 'https://github.com/NEOCONFORMIST/neo-admin',
       'log_tag': 'NEO ADMIN',
       'license': 'GPL v3 License',
       'version': '{{parsed-version}}',
@@ -420,7 +420,8 @@ const char *PLUGIN_FULL_VERSION   = \"{version}\";
         cxx.linkflags += ['-static-libgcc']
       elif cxx.family == 'clang':
         cxx.linkflags += ['-lgcc_eh']
-      cxx.linkflags += ['-static-libstdc++', '-Wl,-z,noexecstack']
+      cxx.cflags += ['-pthread']
+      cxx.linkflags += ['-static-libstdc++', '-pthread', '-Wl,-z,noexecstack']
     elif cxx.target.platform == 'windows':
       cxx.defines += ['WIN32', '_WINDOWS']
 

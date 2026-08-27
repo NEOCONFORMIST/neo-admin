@@ -62,6 +62,7 @@
 #include "votemanager.h"
 #include "voicebridge.h"
 #include "neo_ptt.h"
+#include "neo_admin_compatibility.h"
 #include "neo_admin_persistence.h"
 #include "zombiereborn.h"
 #include <entity.h>
@@ -218,7 +219,12 @@ bool CS2Fixes::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool
 
 	bool bRequiredInitLoaded = true;
 
-	if (!addresses::Initialize(g_GameConfig))
+	const bool coreAddressesReady = addresses::Initialize(g_GameConfig);
+	NeoAdminCompatibility_Refresh(coreAddressesReady);
+	META_CONPRINTF(
+		"[NEO ADMIN] Compatibility: %s\n",
+		NeoAdminCompatibility_Describe().c_str());
+	if (!coreAddressesReady)
 		bRequiredInitLoaded = false;
 
 	if (!InitPatches(g_GameConfig))
@@ -421,6 +427,7 @@ bool CS2Fixes::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool
 	}
 
 	Message("Plugin successfully started!\n");
+	NeoPtt_SetBuildId(PLUGIN_FULL_VERSION);
 	if (!NeoPtt_Start())
 	{
 		META_CONPRINTF(
