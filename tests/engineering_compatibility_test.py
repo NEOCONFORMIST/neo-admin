@@ -60,6 +60,11 @@ def main() -> int:
         "kCapabilityAsyncOutbound",
         "RequestCapabilities = 52",
     )
+    require_text(
+        src / "neo_ptt.h",
+        "NeoPtt_SetBuildId(std::string_view build_id)",
+        "std::uint64_t outbound_coalesced = 0",
+    )
 
     metadata = require_text(
         root / "plugin-metadata.json",

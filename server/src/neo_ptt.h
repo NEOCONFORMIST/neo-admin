@@ -25,6 +25,10 @@ struct NeoPttStats
     std::uint64_t rejected = 0;
     std::uint64_t payload_bytes = 0;
     std::uint32_t last_sequence = 0;
+    std::uint64_t outbound_queued = 0;
+    std::uint64_t outbound_sent = 0;
+    std::uint64_t outbound_dropped = 0;
+    std::uint64_t outbound_coalesced = 0;
 };
 
 
@@ -88,6 +92,7 @@ struct NeoPttFrame
 
 bool NeoPtt_Start();
 void NeoPtt_Shutdown();
+void NeoPtt_SetBuildId(std::string_view build_id);
 
 bool NeoPtt_IsListening();
 std::uint16_t NeoPtt_GetPort();
