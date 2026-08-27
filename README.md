@@ -85,7 +85,7 @@ Android requires future updates to use the same signing certificate.
 
 ### Windows client
 
-<img src="docs/images/windows-live-map.png" alt="NEO ADMIN Windows client showing the live map and operations panel" width="900">
+<img src="docs/images/windows-live-map-current.png" alt="NEO ADMIN Windows client showing the live map and operations panel" width="900">
 
 ### Android client
 
