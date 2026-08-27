@@ -38,6 +38,12 @@ def main() -> int:
         "cxx.linkflags += ['-static-libstdc++', '-pthread', '-Wl,-z,noexecstack']",
     )
     require_text(
+        root / "Dockerfile",
+        "ARG HL2SDK_PROTOC_COMMIT=",
+        "ENV HL2SDK_PROTOC_SHA256=",
+        "raw.githubusercontent.com/alliedmodders/hl2sdk/",
+    )
+    require_text(
         src / "addresses.cpp",
         "Optional game-ban cleanup signature is unavailable",
         "return true;",
