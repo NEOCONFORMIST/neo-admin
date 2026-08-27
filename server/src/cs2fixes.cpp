@@ -100,6 +100,7 @@ SH_DECL_HOOK1_void(IServer, SetGameSpawnGroupMgr, SH_NOATTRIB, 0, IGameSpawnGrou
 SH_DECL_HOOK2_void(CEntitySystem, Spawn, SH_NOATTRIB, 0, int, const EntitySpawnInfo_t*);
 SH_DECL_MANUALHOOK3_void(Teleport, 0, 0, 0, const Vector*, const QAngle*, const Vector*);
 SH_DECL_HOOK1(CServerSideClient, ProcessVoiceData, SH_NOATTRIB, 0, bool, const CCLCMsg_VoiceData_t&);
+SH_DECL_HOOK1_void(CServerSideClient, Disconnect, SH_NOATTRIB, 0, ENetworkDisconnectionReason);
 
 CS2Fixes g_CS2Fixes;
 VoiceBridge g_VoiceBridge;
@@ -125,6 +126,8 @@ int g_iSpawnId = -1;
 int g_iTeleportPreId = -1;
 int g_iTeleportPostId = -1;
 int g_iProcessVoiceDataId = -1;
+int g_iServerSideClientDisconnectId = -1;
+std::uint64_t g_uVoiceBridgeDiagnosticPackets = 0;
 
 double g_flUniversalTime = 0.0;
 float g_flLastTickedTime = 0.0f;
@@ -342,6 +345,7 @@ bool CS2Fixes::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen, bool
 
 	auto pCServerSideClientVTable = (CServerSideClient*)modules::engine->FindVirtualTable("CServerSideClient");
 	g_iProcessVoiceDataId = SH_ADD_DVPHOOK(CServerSideClient, ProcessVoiceData, pCServerSideClientVTable, SH_MEMBER(this, &CS2Fixes::Hook_ProcessVoiceData), false);
+	g_iServerSideClientDisconnectId = SH_ADD_DVPHOOK(CServerSideClient, Disconnect, pCServerSideClientVTable, SH_MEMBER(this, &CS2Fixes::Hook_ServerSideClientDisconnect), false);
 
 	if (!bRequiredInitLoaded)
 	{
@@ -494,6 +498,7 @@ bool CS2Fixes::Unload(char* error, size_t maxlen)
 	SH_REMOVE_HOOK_ID(g_iTeleportPreId);
 	SH_REMOVE_HOOK_ID(g_iTeleportPostId);
 	SH_REMOVE_HOOK_ID(g_iProcessVoiceDataId);
+	SH_REMOVE_HOOK_ID(g_iServerSideClientDisconnectId);
 
 	if (g_iSetGameSpawnGroupMgrId != -1)
 		SH_REMOVE_HOOK_ID(g_iSetGameSpawnGroupMgrId);
@@ -1001,6 +1006,99 @@ void CS2Fixes::Hook_ClientDisconnect(CPlayerSlot slot, ENetworkDisconnectionReas
 	g_playerManager->OnClientDisconnect(slot);
 }
 
+void CS2Fixes::Hook_ServerSideClientDisconnect(
+	ENetworkDisconnectionReason reason)
+{
+	if (reason != NETWORK_DISCONNECT_KICKED ||
+		!g_VoiceBridge.IsConfigured())
+	{
+		RETURN_META(MRES_IGNORED);
+	}
+
+	CServerSideClient* client = META_IFACEPTR(CServerSideClient);
+	if (!client || !client->IsConnected() || !client->m_bIsHLTV)
+		RETURN_META(MRES_IGNORED);
+
+	if (GetGlobals())
+	{
+		CCSPlayerController* firstGameplayBot = nullptr;
+		CCSPlayerController* terroristBot = nullptr;
+		CCSPlayerController* counterTerroristBot = nullptr;
+		int terroristCount = 0;
+		int counterTerroristCount = 0;
+		int terroristHumanCount = 0;
+		int counterTerroristHumanCount = 0;
+
+		for (int slot = 0; slot < GetGlobals()->maxClients; ++slot)
+		{
+			CCSPlayerController* candidate =
+				CCSPlayerController::FromSlot(slot);
+			if (!candidate || !candidate->IsConnected() ||
+				candidate->m_bIsHLTV())
+			{
+				continue;
+			}
+
+			const int team = candidate->m_iTeamNum();
+			if (team == CS_TEAM_T)
+			{
+				++terroristCount;
+				if (candidate->IsBot())
+					terroristBot = terroristBot ? terroristBot : candidate;
+				else
+					++terroristHumanCount;
+			}
+			else if (team == CS_TEAM_CT)
+			{
+				++counterTerroristCount;
+				if (candidate->IsBot())
+					counterTerroristBot = counterTerroristBot
+						? counterTerroristBot
+						: candidate;
+				else
+					++counterTerroristHumanCount;
+			}
+
+			if (candidate->IsBot() && !firstGameplayBot)
+				firstGameplayBot = candidate;
+		}
+
+		CCSPlayerController* botToVacate = firstGameplayBot;
+		if (terroristCount > counterTerroristCount && terroristBot)
+			botToVacate = terroristBot;
+		else if (counterTerroristCount > terroristCount &&
+			counterTerroristBot)
+			botToVacate = counterTerroristBot;
+		else if (terroristHumanCount > counterTerroristHumanCount &&
+			terroristBot)
+			botToVacate = terroristBot;
+		else if (counterTerroristHumanCount > terroristHumanCount &&
+			counterTerroristBot)
+			botToVacate = counterTerroristBot;
+
+		if (botToVacate)
+		{
+			Message(
+				"[NEO PTT] Preserving native SourceTV; "
+				"vacating gameplay bot %s from team %d "
+				"(T=%d, CT=%d).\n",
+				botToVacate->GetPlayerName().c_str(),
+				botToVacate->m_iTeamNum(), terroristCount,
+				counterTerroristCount);
+			g_pEngineServer2->DisconnectClient(
+				botToVacate->GetPlayerSlot(),
+				NETWORK_DISCONNECT_KICKED,
+				"Vacated for a human player");
+			RETURN_META(MRES_SUPERCEDE);
+		}
+	}
+
+	Message(
+		"[NEO PTT] Blocked quota eviction of native SourceTV; "
+		"no gameplay bot was available.\n");
+	RETURN_META(MRES_SUPERCEDE);
+}
+
 void CS2Fixes::Hook_GameFramePost(bool simulating, bool bFirstTick, bool bLastTick)
 {
     static std::uint64_t voiceBridgeDebugFrames = 0;
@@ -1390,7 +1488,7 @@ bool CS2Fixes::Hook_ProcessVoiceData(const CCLCMsg_VoiceData_t& msg)
 		if (steamId == 0)
 			steamId = client->GetClientSteamID().ConvertToUint64();
 
-		g_VoiceBridge.SendVoice(
+		const bool sent = g_VoiceBridge.SendVoice(
 			static_cast<std::uint8_t>(audio.format()),
 			msg.tick(),
 			steamId,
@@ -1404,6 +1502,21 @@ bool CS2Fixes::Hook_ProcessVoiceData(const CCLCMsg_VoiceData_t& msg)
 			packetOffsets,
 			audio.voice_data(),
 			audio.voice_level());
+
+		// Sample the live voice path without flooding the game log. This makes
+		// client routing and CS2 format changes diagnosable on deployed servers.
+		if ((g_uVoiceBridgeDiagnosticPackets++ % 128U) == 0U)
+		{
+			Message(
+				"[NEO ADMIN] [VoiceBridge] player voice format=%u bytes=%zu "
+				"packets=%u offsets=%d peers=%zu sent=%d\n",
+				static_cast<unsigned int>(audio.format()),
+				audio.voice_data().size(),
+				audio.num_packets(),
+				audio.packet_offsets_size(),
+				NeoPtt_GetPeerCount(),
+				sent ? 1 : 0);
+		}
 	}
 
 	RETURN_META_VALUE(MRES_IGNORED, true);

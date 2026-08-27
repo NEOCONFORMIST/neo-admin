@@ -37,6 +37,38 @@ static FnConCommandRegisterCallback s_ConCommandRegCB = nullptr;
 static uint64 s_nCVarFlag = 0;
 static bool s_bRegistered = false;
 
+namespace
+{
+	constexpr size_t MAX_TRACKED_CONVARS = 4096;
+
+	ConCommandRef *s_RegisteredCommands[MAX_TRACKED_CONVARS] = {};
+	size_t s_nRegisteredCommands = 0;
+	ConVarRef *s_RegisteredConVars[MAX_TRACKED_CONVARS] = {};
+	size_t s_nRegisteredConVars = 0;
+
+	template <typename T>
+	void TrackRegisteredRef( T *ref, T **refs, size_t &count )
+	{
+		if ( count < MAX_TRACKED_CONVARS )
+			refs[count++] = ref;
+	}
+
+	template <typename T>
+	void UntrackRegisteredRef( T *ref, T **refs, size_t &count )
+	{
+		for ( size_t i = 0; i < count; ++i )
+		{
+			if ( refs[i] != ref )
+				continue;
+
+			refs[i] = refs[--count];
+			refs[count] = nullptr;
+			return;
+		}
+	}
+
+}
+
 class ConCommandRegList
 {
 public:
@@ -54,8 +86,13 @@ public:
 			Plat_FatalErrorFunc( "RegisterConCommand: Unknown error registering con command \"%s\"!\n", cmd.m_Info.m_pszName );
 			DebuggerBreakIfDebugging();
 		}
-		else if(s_ConCommandRegCB)
-			s_ConCommandRegCB( cmd.m_Command );
+		else
+		{
+			TrackRegisteredRef( cmd.m_Command, s_RegisteredCommands, s_nRegisteredCommands );
+
+			if(s_ConCommandRegCB)
+				s_ConCommandRegCB( cmd.m_Command );
+		}
 	}
 
 	static void RegisterAll()
@@ -131,6 +168,14 @@ void UnRegisterConCommand( ConCommand *cmd )
 
 		cmd->InvalidateRef();
 	}
+
+	UntrackRegisteredRef( static_cast<ConCommandRef *>( cmd ), s_RegisteredCommands, s_nRegisteredCommands );
+}
+
+void ReleaseConCommand( ConCommand *cmd )
+{
+	cmd->InvalidateRef();
+	UntrackRegisteredRef( static_cast<ConCommandRef *>( cmd ), s_RegisteredCommands, s_nRegisteredCommands );
 }
 
 class ConVarRegList
@@ -152,9 +197,14 @@ public:
 			Plat_FatalErrorFunc( "RegisterConVar: Unknown error registering convar \"%s\"!\n", cvar.m_Info.m_pszName );
 			DebuggerBreakIfDebugging();
 		}
-		// Don't let references pass as a newly registered cvar
-		else if(s_ConVarRegCB && (cvar.m_Info.m_nFlags & FCVAR_REFERENCE) == 0)
-			s_ConVarRegCB( cvar.m_pConVar );
+		else
+		{
+			TrackRegisteredRef( static_cast<ConVarRef *>( cvar.m_pConVar ), s_RegisteredConVars, s_nRegisteredConVars );
+
+			// Don't let references pass as a newly registered cvar
+			if(s_ConVarRegCB && (cvar.m_Info.m_nFlags & FCVAR_REFERENCE) == 0)
+				s_ConVarRegCB( cvar.m_pConVar );
+		}
 	}
 
 	static void RegisterAll()
@@ -231,6 +281,14 @@ void UnRegisterConVar( ConVarRef *cvar )
 
 		cvar->InvalidateRef();
 	}
+
+	UntrackRegisteredRef( cvar, s_RegisteredConVars, s_nRegisteredConVars );
+}
+
+void ReleaseConVar( ConVarRef *cvar )
+{
+	cvar->InvalidateRef();
+	UntrackRegisteredRef( cvar, s_RegisteredConVars, s_nRegisteredConVars );
 }
 
 uint64 SanitiseConVarFlags( uint64 flags )
@@ -273,8 +331,14 @@ void ConVar_Register( uint64 nCVarFlag, FnConVarRegisterCallback cvar_reg_cb, Fn
 
 void ConVar_Unregister( )
 {
-	if ( !g_pCVar || !s_bRegistered )
+	if ( !s_bRegistered )
 		return;
+
+	while ( s_nRegisteredCommands > 0 )
+		UnRegisterConCommand( static_cast<ConCommand *>( s_RegisteredCommands[s_nRegisteredCommands - 1] ) );
+
+	while ( s_nRegisteredConVars > 0 )
+		UnRegisterConVar( s_RegisteredConVars[s_nRegisteredConVars - 1] );
 
 	s_bRegistered = false;
 }
@@ -478,7 +542,7 @@ void ConCommand::Create( const char* pName, const ConCommandCallbackInfo_t &cb, 
 
 void ConCommand::Destroy()
 {
-	UnRegisterConCommand( this );
+	ReleaseConCommand( this );
 }
 
 //-----------------------------------------------------------------------------

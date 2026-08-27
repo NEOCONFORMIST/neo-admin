@@ -1,0 +1,10 @@
+﻿{
+    "MapName":  "cs_italy",
+    "DisplayName":  "Italy",
+    "PosX":  -2647,
+    "PosY":  2592,
+    "Scale":  4.6,
+    "Rotate":  false,
+    "ImageFile":  "cs_italy.png",
+    "Notes":  "CS2 game-depot radar. Extra radar levels: "
+}

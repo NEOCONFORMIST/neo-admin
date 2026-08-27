@@ -1,0 +1,10 @@
+﻿{
+    "MapName":  "cs_office",
+    "DisplayName":  "Office",
+    "PosX":  -1838,
+    "PosY":  1858,
+    "Scale":  4.1,
+    "Rotate":  false,
+    "ImageFile":  "cs_office.png",
+    "Notes":  "CS2 game-depot radar. Extra radar levels: "
+}

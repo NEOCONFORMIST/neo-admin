@@ -75,7 +75,7 @@ internal sealed class FirstOwnerSetupForm : NeoForm
         layout.Controls.Add(instructions, 0, 1);
         layout.SetColumnSpan(instructions, 2);
 
-        AddRow(layout, 2, "Server address", _serverAddress);
+        AddRow(layout, 2, "Public IPv4 / DNS", _serverAddress);
         AddRow(layout, 3, "UDP port", _serverPort);
         AddRow(layout, 4, "Setup code", _setupCode);
         AddRow(layout, 5, "Your name", _displayName);

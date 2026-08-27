@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="LiveMapOverviewProbe.cs" />
+    <Compile Include="..\windows\NEO.Admin\AdminPermissions.cs" Link="AdminPermissions.cs" />
+    <Compile Include="..\windows\NEO.Admin\AppConfig.cs" Link="AppConfig.cs" />
+    <Compile Include="..\windows\NEO.Admin\BridgeCommandPacket.cs" Link="BridgeCommandPacket.cs" />
+    <Compile Include="..\windows\NEO.Admin\UdpVoiceReceiver.cs" Link="UdpVoiceReceiver.cs" />
+    <Compile Include="..\windows\NEO.Admin\VoicePacket.cs" Link="VoicePacket.cs" />
+  </ItemGroup>
+</Project>

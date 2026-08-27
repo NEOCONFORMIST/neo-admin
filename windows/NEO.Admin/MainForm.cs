@@ -46,6 +46,7 @@ internal sealed class MainForm : NeoForm
     private readonly Label _healthVersionLabel = new();
     private readonly DataGridView _playersGrid = new();
     private readonly MapOverviewControl _mapOverview = new();
+    private readonly Label _mapOverviewTitle = new();
     private readonly TrackBar _volume = new();
     private readonly Button _startRecordingButton = new();
     private readonly Button _stopRecordingButton = new();
@@ -107,6 +108,16 @@ internal sealed class MainForm : NeoForm
     private readonly ToolStripButton _connectServerButton = new();
     private readonly ToolStripLabel _serverConnectionLabel = new();
     private readonly ToolStripLabel _adminSessionLabel = new();
+    private TableLayoutPanel _rootLayout = null!;
+    private MenuStrip _mainMenu = null!;
+    private ToolStrip _connectionBar = null!;
+    private Control _serverHealthPanel = null!;
+    private Control _authenticatedWorkspace = null!;
+    private Control _disconnectedWorkspace = null!;
+    private readonly Label _disconnectedServerNameLabel = new();
+    private readonly Label _disconnectedEndpointLabel = new();
+    private readonly Label _disconnectedStatusLabel = new();
+    private readonly Button _disconnectedConnectButton = new();
     private readonly ToolStripMenuItem _adminAccountsMenuItem =
         new("Administrator &Accounts...");
     private readonly ToolStripMenuItem _inGameAdminsMenuItem =
@@ -370,7 +381,7 @@ internal sealed class MainForm : NeoForm
         _connectServerButton.Text = "CONNECT";
         ClearPlayerRoster();
         _serverMapCatalog.Clear();
-        _serverMapDisplay.Text = string.Empty;
+        ClearCurrentMapDisplay();
         ApplyAdminSession(null);
         RefreshServerProfileSelector();
 
@@ -415,7 +426,7 @@ internal sealed class MainForm : NeoForm
             ClearPlayerRoster();
 
             _serverMapCatalog.Clear();
-            _serverMapDisplay.Text = string.Empty;
+            ClearCurrentMapDisplay();
             _openMapWindowWhenCatalogArrives = false;
             ResetServerHealthDisplay("DISCONNECTED");
 
@@ -443,6 +454,7 @@ internal sealed class MainForm : NeoForm
             _serverConnectionLabel.ForeColor =
                 NeoTheme.Danger;
 
+            RefreshDisconnectedWorkspace("Enter a server address to connect.");
             UpdatePttTargetLabel();
             return;
         }
@@ -461,6 +473,8 @@ internal sealed class MainForm : NeoForm
             _serverConnectionLabel.ForeColor =
                 NeoTheme.Danger;
 
+            RefreshDisconnectedWorkspace(message);
+
             if (showErrorDialog)
             {
                 MessageBox.Show(
@@ -476,9 +490,12 @@ internal sealed class MainForm : NeoForm
         }
 
         _connectServerButton.Enabled = false;
+        _disconnectedConnectButton.Enabled = false;
+        _disconnectedConnectButton.Text = "CONNECTING...";
 
         _serverConnectionLabel.Text =
             "Server: resolving...";
+        RefreshDisconnectedWorkspace("Connecting and waiting for authentication...");
         ResetServerHealthDisplay("CONNECTING");
 
         _serverConnectionLabel.ForeColor =
@@ -517,11 +534,13 @@ internal sealed class MainForm : NeoForm
                 $"Login sent: {address} -> " +
                 $"{endpoint.Address}:{endpoint.Port}/UDP; " +
                 "waiting for server reply";
+            RefreshDisconnectedWorkspace(
+                "Login sent. Waiting for the server to authenticate this account...");
 
             ClearPlayerRoster();
 
             _serverMapCatalog.Clear();
-            _serverMapDisplay.Text = string.Empty;
+            ClearCurrentMapDisplay();
             _openMapWindowWhenCatalogArrives = false;
 
             UpdateServerChatUi();
@@ -540,6 +559,8 @@ internal sealed class MainForm : NeoForm
 
             _statusLabel.Text =
                 $"Server target error: {exception.Message}";
+            RefreshDisconnectedWorkspace(
+                $"Connection failed: {exception.Message}");
             ResetServerHealthDisplay("CONNECTION FAILED");
 
             if (showErrorDialog)
@@ -555,6 +576,8 @@ internal sealed class MainForm : NeoForm
         finally
         {
             _connectServerButton.Enabled = true;
+            _disconnectedConnectButton.Enabled = true;
+            _disconnectedConnectButton.Text = "CONNECT";
             UpdateServerChatUi();
             UpdatePttTargetLabel();
         }
@@ -562,26 +585,26 @@ internal sealed class MainForm : NeoForm
 
     private void BuildUi()
     {
-        MenuStrip menu = BuildMenu();
-        ToolStrip connectionBar = BuildConnectionBar();
-        Control serverHealthPanel = BuildServerHealthPanel();
-        serverHealthPanel.Visible =
+        _mainMenu = BuildMenu();
+        _connectionBar = BuildConnectionBar();
+        _serverHealthPanel = BuildServerHealthPanel();
+        _serverHealthPanel.Visible =
             _config.EnableServerHealthPanel;
 
-        ConfigureServerConnectionUi(connectionBar);
+        ConfigureServerConnectionUi(_connectionBar);
 
         ConfigureGrid();
 
-        var mapTitle = new Label
-        {
-            Text = "LIVE MAP OVERVIEW",
-            Dock = DockStyle.Fill,
-            Font = new Font(Font.FontFamily, 11F, FontStyle.Bold),
-            TextAlign = ContentAlignment.MiddleLeft,
-            Padding = new Padding(14, 0, 0, 0),
-            BackColor = Color.FromArgb(31, 36, 41),
-            ForeColor = Color.WhiteSmoke,
-        };
+        _mapOverviewTitle.Text = "LIVE MAP OVERVIEW - --";
+        _mapOverviewTitle.Dock = DockStyle.Fill;
+        _mapOverviewTitle.Font = new Font(
+            Font.FontFamily,
+            11F,
+            FontStyle.Bold);
+        _mapOverviewTitle.TextAlign = ContentAlignment.MiddleLeft;
+        _mapOverviewTitle.Padding = new Padding(14, 0, 0, 0);
+        _mapOverviewTitle.BackColor = Color.FromArgb(31, 36, 41);
+        _mapOverviewTitle.ForeColor = Color.WhiteSmoke;
 
         var mapPanel = new TableLayoutPanel
         {
@@ -595,7 +618,7 @@ internal sealed class MainForm : NeoForm
         mapPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         mapPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
         mapPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        mapPanel.Controls.Add(mapTitle, 0, 0);
+        mapPanel.Controls.Add(_mapOverviewTitle, 0, 0);
         mapPanel.Controls.Add(_mapOverview, 0, 1);
 
         var sideTitle = new Label
@@ -1522,7 +1545,20 @@ internal sealed class MainForm : NeoForm
         Shown += (_, _) =>
             BeginInvoke((Action)ResizeDashboardPanels);
 
-        var layout = new TableLayoutPanel
+        _authenticatedWorkspace = split;
+        _disconnectedWorkspace = BuildDisconnectedWorkspace();
+
+        var workspaceHost = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = Color.Black,
+        };
+        workspaceHost.Controls.Add(_authenticatedWorkspace);
+        workspaceHost.Controls.Add(_disconnectedWorkspace);
+
+        _rootLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
@@ -1530,25 +1566,163 @@ internal sealed class MainForm : NeoForm
             Margin = Padding.Empty,
             Padding = Padding.Empty,
         };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38F));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46F));
-        layout.RowStyles.Add(
+        _rootLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38F));
+        _rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 46F));
+        _rootLayout.RowStyles.Add(
             new RowStyle(
                 SizeType.Absolute,
                 _config.EnableServerHealthPanel ? 104F : 0F));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.Controls.Add(menu, 0, 0);
-        layout.Controls.Add(connectionBar, 0, 1);
-        layout.Controls.Add(serverHealthPanel, 0, 2);
-        layout.Controls.Add(split, 0, 3);
+        _rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        _rootLayout.Controls.Add(_mainMenu, 0, 0);
+        _rootLayout.Controls.Add(_connectionBar, 0, 1);
+        _rootLayout.Controls.Add(_serverHealthPanel, 0, 2);
+        _rootLayout.Controls.Add(workspaceHost, 0, 3);
 
-        MainMenuStrip = menu;
-        Controls.Add(layout);
+        MainMenuStrip = _mainMenu;
+        Controls.Add(_rootLayout);
 
         SetSteamIdDisplayFormat(SteamIdDisplayFormat.Steam2);
         SetRecordingUi(false);
         UpdatePlayerCount();
+    }
+
+    private Control BuildDisconnectedWorkspace()
+    {
+        var screen = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 3,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = Color.Black,
+        };
+        screen.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+        screen.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 620F));
+        screen.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+        screen.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+        screen.RowStyles.Add(new RowStyle(SizeType.Absolute, 430F));
+        screen.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+
+        var content = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 7,
+            Margin = Padding.Empty,
+            Padding = new Padding(24),
+            BackColor = Color.Black,
+        };
+        content.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 34F));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 72F));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 36F));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 66F));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 54F));
+        content.RowStyles.Add(new RowStyle(SizeType.Absolute, 46F));
+
+        var brand = new Label
+        {
+            Text = "NEO ADMIN",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Segoe UI", 11F, FontStyle.Bold),
+            ForeColor = NeoTheme.MutedText,
+        };
+        var heading = new Label
+        {
+            Text = "CONNECT",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Segoe UI", 28F, FontStyle.Bold),
+            ForeColor = NeoTheme.Text,
+        };
+
+        _disconnectedServerNameLabel.Dock = DockStyle.Fill;
+        _disconnectedServerNameLabel.TextAlign = ContentAlignment.MiddleCenter;
+        _disconnectedServerNameLabel.Font = new Font("Segoe UI", 14F, FontStyle.Bold);
+        _disconnectedServerNameLabel.ForeColor = NeoTheme.Text;
+
+        _disconnectedEndpointLabel.Dock = DockStyle.Fill;
+        _disconnectedEndpointLabel.TextAlign = ContentAlignment.MiddleCenter;
+        _disconnectedEndpointLabel.Font = new Font("Segoe UI", 11F);
+        _disconnectedEndpointLabel.ForeColor = NeoTheme.MutedText;
+
+        _disconnectedStatusLabel.Dock = DockStyle.Fill;
+        _disconnectedStatusLabel.TextAlign = ContentAlignment.MiddleCenter;
+        _disconnectedStatusLabel.Font = new Font("Segoe UI", 10F);
+        _disconnectedStatusLabel.ForeColor = NeoTheme.MutedText;
+        _disconnectedStatusLabel.AutoEllipsis = true;
+
+        _disconnectedConnectButton.Text = "CONNECT";
+        _disconnectedConnectButton.Dock = DockStyle.Fill;
+        _disconnectedConnectButton.Margin = new Padding(110, 2, 110, 2);
+        _disconnectedConnectButton.Font = new Font("Segoe UI", 11F, FontStyle.Bold);
+        _disconnectedConnectButton.Click += async (_, _) =>
+            await ConnectServerFromUiAsync(true);
+
+        var editServerButton = new Button
+        {
+            Text = "EDIT SERVER",
+            Dock = DockStyle.Fill,
+            Margin = new Padding(180, 4, 180, 0),
+        };
+        editServerButton.Click += async (_, _) =>
+            await ShowServerProfileManagerAsync();
+
+        content.Controls.Add(brand, 0, 0);
+        content.Controls.Add(heading, 0, 1);
+        content.Controls.Add(_disconnectedServerNameLabel, 0, 2);
+        content.Controls.Add(_disconnectedEndpointLabel, 0, 3);
+        content.Controls.Add(_disconnectedStatusLabel, 0, 4);
+        content.Controls.Add(_disconnectedConnectButton, 0, 5);
+        content.Controls.Add(editServerButton, 0, 6);
+        screen.Controls.Add(content, 1, 1);
+        return screen;
+    }
+
+    private void SetAuthenticatedWorkspaceVisible(
+        bool authenticated,
+        string? disconnectedStatus = null)
+    {
+        _mainMenu.Visible = authenticated;
+        _connectionBar.Visible = authenticated;
+        _serverHealthPanel.Visible =
+            authenticated && _config.EnableServerHealthPanel;
+        _authenticatedWorkspace.Visible = authenticated;
+        _disconnectedWorkspace.Visible = !authenticated;
+
+        _rootLayout.RowStyles[0].Height = authenticated ? 38F : 0F;
+        _rootLayout.RowStyles[1].Height = authenticated ? 46F : 0F;
+        _rootLayout.RowStyles[2].Height =
+            authenticated && _config.EnableServerHealthPanel ? 104F : 0F;
+
+        if (!authenticated)
+        {
+            RefreshDisconnectedWorkspace(disconnectedStatus);
+            _disconnectedWorkspace.BringToFront();
+        }
+        else
+        {
+            _authenticatedWorkspace.BringToFront();
+        }
+    }
+
+    private void RefreshDisconnectedWorkspace(string? status = null)
+    {
+        ServerProfile profile = _serverConnectionSettings.ActiveServer;
+        bool configured = !string.IsNullOrWhiteSpace(profile.ServerAddress);
+        _disconnectedServerNameLabel.Text = configured
+            ? profile.Name
+            : "Server not configured";
+        _disconnectedEndpointLabel.Text = configured
+            ? $"{profile.ServerAddress}:{profile.ServerPttPort}"
+            : "Server information required";
+        _disconnectedStatusLabel.Text = string.IsNullOrWhiteSpace(status)
+            ? "Not connected"
+            : status;
     }
 
     private Control BuildServerHealthPanel()
@@ -1857,7 +2031,8 @@ internal sealed class MainForm : NeoForm
 
     private void ApplyAdminSession(AdminSession? session)
     {
-        if (session?.Authenticated == true)
+        bool authenticated = session?.Authenticated == true;
+        if (authenticated)
         {
             _adminSessionLabel.Text =
                 $"Signed in: {session.DisplayName} ({session.Role})";
@@ -1871,6 +2046,10 @@ internal sealed class MainForm : NeoForm
                 $"Account: {_receiver.CurrentAdminId} (not signed in)";
             _adminSessionLabel.ForeColor = NeoTheme.Danger;
         }
+
+        SetAuthenticatedWorkspaceVisible(
+            authenticated,
+            session?.Message ?? _statusLabel.Text);
 
         _adminAccountsMenuItem.Enabled =
             session?.Can(AdminPermission.ManageAccounts) == true;
@@ -3512,7 +3691,15 @@ internal sealed class MainForm : NeoForm
         if (string.IsNullOrWhiteSpace(mapName))
             return;
 
-        _serverMapDisplay.Text = mapName.Trim();
+        string displayName = mapName.Trim();
+        _serverMapDisplay.Text = displayName;
+        _mapOverviewTitle.Text = $"LIVE MAP OVERVIEW - {displayName}";
+    }
+
+    private void ClearCurrentMapDisplay()
+    {
+        _serverMapDisplay.Text = string.Empty;
+        _mapOverviewTitle.Text = "LIVE MAP OVERVIEW - --";
     }
 
     private async Task OpenMapSelectionWindowAsync()
@@ -4738,6 +4925,8 @@ internal sealed class MainForm : NeoForm
         PostToUi(() =>
         {
             _statusLabel.Text = message;
+            if (_receiver.CurrentSession?.Authenticated != true)
+                RefreshDisconnectedWorkspace(message);
             AppendPluginConsole(message);
         });
     }

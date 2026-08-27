@@ -433,7 +433,8 @@ void FASTCALL Detour_UTIL_SayText2Filter(
 
 // NEO CHAT STAGE 3S ADMIN BROADCAST BEGIN
 void NeoAdmin_BroadcastChat(
-    const char* text)
+    const char* text,
+    const char* sender_name)
 {
     if (!text ||
         !*text)
@@ -479,13 +480,47 @@ void NeoAdmin_BroadcastChat(
     if (output == 0)
         return;
 
-    char message[256] = {};
+    char sanitized_sender[33] = {};
+    std::size_t sender_output = 0;
+    if (sender_name)
+    {
+        for (const unsigned char* input =
+                 reinterpret_cast<const unsigned char*>(sender_name);
+             *input != 0 && sender_output < sizeof(sanitized_sender) - 1;
+             ++input)
+        {
+            const unsigned char ch = *input;
+            if (ch == '\r' || ch == '\n' || ch == 0)
+                continue;
+            if (ch < 0x20U)
+            {
+                if (ch == '\t')
+                    sanitized_sender[sender_output++] = ' ';
+                continue;
+            }
+            sanitized_sender[sender_output++] = static_cast<char>(ch);
+        }
+    }
+    sanitized_sender[sender_output] = '\0';
 
-    V_snprintf(
-        message,
-        sizeof(message),
-        " \4[NEO ADMIN]\1 %s",
-        sanitized);
+    char message[320] = {};
+    if (sender_output > 0)
+    {
+        V_snprintf(
+            message,
+            sizeof(message),
+            " \4[NEO ADMIN]\1 %s: %s",
+            sanitized_sender,
+            sanitized);
+    }
+    else
+    {
+        V_snprintf(
+            message,
+            sizeof(message),
+            " \4[NEO ADMIN]\1 %s",
+            sanitized);
+    }
 
     CRecipientFilter filter;
     filter.AddAllPlayers();
@@ -502,13 +537,23 @@ void NeoAdmin_BroadcastChat(
     // the Windows chat history is server-authoritative.
     g_VoiceBridge.SendChatMessage(
         -1,
-        "NEO ADMIN",
+        sender_output > 0 ? sanitized_sender : "NEO ADMIN",
         sanitized,
         0x01U);
 
-    Message(
-        "[NEO CHAT] Admin message broadcast: \"%s\"\n",
-        sanitized);
+    if (sender_output > 0)
+    {
+        Message(
+            "[NEO CHAT] %s sent a message: \"%s\"\n",
+            sanitized_sender,
+            sanitized);
+    }
+    else
+    {
+        Message(
+            "[NEO CHAT] Admin message broadcast: \"%s\"\n",
+            sanitized);
+    }
 }
 // NEO CHAT STAGE 3S ADMIN BROADCAST END
 

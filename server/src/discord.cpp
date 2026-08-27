@@ -20,6 +20,7 @@
 #include "discord.h"
 #include "KeyValues.h"
 #include "common.h"
+#include "filesystem.h"
 #include "httpmanager.h"
 #include "interfaces/interfaces.h"
 #include "utlstring.h"
@@ -83,6 +84,19 @@ bool CDiscordBotManager::LoadDiscordBotsConfig()
 
 	if (!jsonFile.is_open())
 	{
+		const char* pszLegacyPath = "addons/cs2fixes/configs/discordbots.cfg";
+		if (!g_pFullFileSystem->FileExists(pszJsonPath) &&
+			!g_pFullFileSystem->FileExists(pszLegacyPath))
+		{
+			Message("Optional Discord bot config is not present; Discord integration is disabled.\n");
+			return true;
+		}
+		if (g_pFullFileSystem->FileExists(pszJsonPath))
+		{
+			Panic("Failed to open %s, discord bots are not loaded!\n", pszJsonPath);
+			return false;
+		}
+
 		if (!ConvertDiscordBotsKVToJSON())
 		{
 			Panic("Failed to open %s and convert KV1 discordbots.cfg to JSON format, discord bots are not loaded!\n", pszJsonPath);

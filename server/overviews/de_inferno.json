@@ -1,0 +1,10 @@
+﻿{
+    "MapName":  "de_inferno",
+    "DisplayName":  "Inferno",
+    "PosX":  -2087,
+    "PosY":  3870,
+    "Scale":  4.9,
+    "Rotate":  false,
+    "ImageFile":  "de_inferno.png",
+    "Notes":  "CS2 game-depot radar. Extra radar levels: "
+}

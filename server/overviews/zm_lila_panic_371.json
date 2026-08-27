@@ -1,0 +1,10 @@
+{
+  "MapName": "zm_lila_panic_371",
+  "DisplayName": "Zombie Survival - Lila Panic",
+  "PosX": -3010.5164,
+  "PosY": 1078.8701,
+  "Scale": 3.9169022,
+  "Rotate": false,
+  "ImageFile": "zm_lila_panic_371.png",
+  "Notes": "Calibrated from the map's Source 2 collision geometry. Workshop item 3484400725."
+}

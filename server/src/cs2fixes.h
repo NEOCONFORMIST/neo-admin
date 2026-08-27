@@ -78,6 +78,7 @@ public: // hooks
 	void Hook_GameFramePost(bool simulating, bool bFirstTick, bool bLastTick);
 	void Hook_ClientActive(CPlayerSlot slot, bool bLoadGame, const char* pszName, uint64 xuid);
 	void Hook_ClientDisconnect(CPlayerSlot slot, ENetworkDisconnectionReason reason, const char* pszName, uint64 xuid, const char* pszNetworkID);
+	void Hook_ServerSideClientDisconnect(ENetworkDisconnectionReason reason);
 	void Hook_ClientPutInServer(CPlayerSlot slot, char const* pszName, int type, uint64 xuid);
 	void Hook_ClientSettingsChanged(CPlayerSlot slot);
 	void Hook_OnClientConnected(CPlayerSlot slot, const char* pszName, uint64 xuid, const char* pszNetworkID, const char* pszAddress, bool bFakePlayer);

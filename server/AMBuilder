@@ -47,6 +47,7 @@ for sdk_target in MMSPlugin.sdk_targets:
     'src/cs2fixes.cpp',
     'src/voicebridge.cpp',
     'src/voicebridge_protocol.cpp',
+    'src/neo_map_overview_assets.cpp',
     'src/neo_ptt.cpp',
     'src/neo_admin_persistence.cpp',
     'src/neo_admin_accounts.cpp',

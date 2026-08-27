@@ -202,7 +202,12 @@ internal sealed class AudioMixer : IDisposable
         if (payloadLength == 0)
             yield break;
 
-        uint[] offsets = packet.PacketOffsets;
+        int declaredPacketCount = checked((int)Math.Min(
+            packet.NumPackets,
+            (uint)packet.PacketOffsets.Length));
+        uint[] offsets = declaredPacketCount == packet.PacketOffsets.Length
+            ? packet.PacketOffsets
+            : packet.PacketOffsets.Take(declaredPacketCount).ToArray();
         if (packet.NumPackets <= 1 || offsets.Length == 0)
         {
             yield return (0, payloadLength);

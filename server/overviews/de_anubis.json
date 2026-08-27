@@ -1,0 +1,10 @@
+﻿{
+    "MapName":  "de_anubis",
+    "DisplayName":  "Anubis",
+    "PosX":  -2796,
+    "PosY":  3328,
+    "Scale":  5.22,
+    "Rotate":  false,
+    "ImageFile":  "de_anubis.png",
+    "Notes":  "CS2 game-depot radar. Extra radar levels: "
+}

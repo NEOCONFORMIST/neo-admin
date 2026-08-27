@@ -1,0 +1,10 @@
+﻿{
+    "MapName":  "ar_shoots",
+    "DisplayName":  "Shoots",
+    "PosX":  -1368,
+    "PosY":  1952,
+    "Scale":  2.6875,
+    "Rotate":  false,
+    "ImageFile":  "ar_shoots.png",
+    "Notes":  "CS2 game-depot radar. Extra radar levels: "
+}

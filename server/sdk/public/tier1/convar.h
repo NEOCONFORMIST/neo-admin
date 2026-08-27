@@ -1241,6 +1241,7 @@ protected:
 uint64 SanitiseConVarFlags( uint64 flags );
 void SetupConVar( ConVarRefAbstract *cvar, ConVarData **cvar_data, ConVarCreation_t &info );
 void UnRegisterConVar( ConVarRef *cvar );
+void ReleaseConVar( ConVarRef *cvar );
 
 template<typename T>
 class CConVarRef : public ConVarRefAbstract
@@ -1354,7 +1355,7 @@ public:
 
 	~CConVar()
 	{
-		UnRegisterConVar( this );
+		ReleaseConVar( this );
 		BaseClass::InvalidateConVarData();
 	}
 };

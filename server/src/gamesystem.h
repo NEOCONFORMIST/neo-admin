@@ -25,6 +25,8 @@
 #include <string>
 #include <vector>
 
+class CCSPlayerController;
+
 // Stupid, but hopefully temporary hack
 #define private public
 #define protected public
@@ -50,6 +52,7 @@ bool NeoAdmin_PrepareMapProfile(
 	const NeoFilesystemMapEntry& map,
 	std::string& error);
 void NeoAdmin_ChangeStoredMap(const std::string& map);
+int NeoAdmin_RemoveGameplayBots();
 
 template <class T, class U = T>
 class CGameSystemStaticCustomFactory : public CGameSystemStaticFactory<T, U>

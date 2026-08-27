@@ -155,15 +155,6 @@ bool VoiceBridge::IsConfigured() const
     return HasOutputTransport();
 }
 
-std::span<const std::uint8_t> VoiceBridge::SigningSecret() const
-{
-    const std::span<const std::uint8_t> peer_secret =
-        NeoPtt_GetPeerSecret();
-    return peer_secret.empty()
-        ? std::span<const std::uint8_t>(shared_secret_)
-        : peer_secret;
-}
-
 bool VoiceBridge::ConfigureFromEnvironment()
 {
     Shutdown();
@@ -379,10 +370,7 @@ bool VoiceBridge::SendVoice(
             encoded_audio.size()),
     };
 
-    return SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(
-            data,
-            SigningSecret()));
+    return SendPacket(data);
 #endif
 }
 
@@ -421,7 +409,8 @@ bool VoiceBridge::SendAdminActionResult(
     std::uint32_t action,
     std::int32_t player_slot,
     bool success,
-    const char* message)
+    const char* message,
+    std::uint64_t session_id)
 {
 #if !defined(__linux__)
     (void)request_sequence;
@@ -429,6 +418,7 @@ bool VoiceBridge::SendAdminActionResult(
     (void)player_slot;
     (void)success;
     (void)message;
+    (void)session_id;
     return false;
 #else
     if (!HasOutputTransport())
@@ -482,10 +472,7 @@ bool VoiceBridge::SendAdminActionResult(
                 message_view.size()),
     };
 
-    return SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(
-            data,
-            SigningSecret()));
+    return SendPacket(data, session_id);
 #endif
 }
 // NEO ADMIN CONTROL STAGE 3T RESULT END
@@ -494,11 +481,13 @@ bool VoiceBridge::SendAdminActionResult(
 // NEO MAP CATALOG STAGE 3V BEGIN
 bool VoiceBridge::SendMapCatalog(
     std::string_view catalog,
-    std::uint32_t map_count)
+    std::uint32_t map_count,
+    std::uint64_t session_id)
 {
 #if !defined(__linux__)
     (void)catalog;
     (void)map_count;
+    (void)session_id;
     return false;
 #else
     constexpr std::size_t
@@ -550,13 +539,67 @@ bool VoiceBridge::SendMapCatalog(
                 catalog.size()),
     };
 
-    return SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(
-            data,
-            SigningSecret()));
+    return SendPacket(data, session_id);
 #endif
 }
 // NEO MAP CATALOG STAGE 3V END
+
+bool VoiceBridge::SendMapOverviewChunk(
+    std::uint32_t request_sequence,
+    std::string_view map_name,
+    std::uint32_t chunk_index,
+    std::uint32_t chunk_count,
+    std::uint64_t package_length,
+    std::uint32_t package_hash,
+    std::uint32_t definition_length,
+    std::span<const std::uint8_t> chunk,
+    std::uint64_t session_id)
+{
+#if !defined(__linux__)
+    (void)request_sequence;
+    (void)map_name;
+    (void)chunk_index;
+    (void)chunk_count;
+    (void)package_length;
+    (void)package_hash;
+    (void)definition_length;
+    (void)chunk;
+    (void)session_id;
+    return false;
+#else
+    if (!HasOutputTransport() ||
+        map_name.empty() ||
+        chunk.empty() ||
+        chunk.size() > 1200 ||
+        chunk_count == 0 ||
+        chunk_index >= chunk_count)
+    {
+        return false;
+    }
+
+    const voicebridge::VoicePacketData data{
+        .message_type = voicebridge::kMessageMapOverviewChunk,
+        .audio_format = 0,
+        .flags = static_cast<std::uint8_t>(
+            chunk_index + 1 == chunk_count ? 0x01U : 0U),
+        .sequence = sequence_.fetch_add(1, std::memory_order_relaxed),
+        .tick = request_sequence,
+        .steam_id = package_length,
+        .player_slot = static_cast<std::int32_t>(chunk_index),
+        .sample_rate = chunk_count,
+        .sequence_bytes = static_cast<std::int32_t>(package_hash),
+        .section_number = definition_length,
+        .uncompressed_sample_offset = 0,
+        .num_packets = 0,
+        .voice_level = 0.0f,
+        .player_name = map_name,
+        .packet_offsets = {},
+        .payload = chunk,
+    };
+
+    return SendPacket(data, session_id);
+#endif
+}
 
 
 bool VoiceBridge::SendServerHealth(
@@ -564,7 +607,8 @@ bool VoiceBridge::SendServerHealth(
     std::uint32_t current_tick,
     std::int32_t connected_players,
     std::uint32_t max_players,
-    const char* plugin_version)
+    const char* plugin_version,
+    std::uint64_t session_id)
 {
 #if !defined(__linux__)
     (void)request_sequence;
@@ -572,6 +616,7 @@ bool VoiceBridge::SendServerHealth(
     (void)connected_players;
     (void)max_players;
     (void)plugin_version;
+    (void)session_id;
     return false;
 #else
     if (!HasOutputTransport())
@@ -675,10 +720,7 @@ bool VoiceBridge::SendServerHealth(
         .payload = {},
     };
 
-    return SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(
-            data,
-            SigningSecret()));
+    return SendPacket(data, session_id);
 #endif
 }
 
@@ -742,10 +784,7 @@ bool VoiceBridge::SendChatMessage(
                 message_view.size()),
     };
 
-    return SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(
-            data,
-            SigningSecret()));
+    return SendPacket(data);
 #endif
 }
 // NEO CHAT STAGE 3S SERVER EVENT END
@@ -790,10 +829,7 @@ bool VoiceBridge::SendPlayerState(
         .payload = {},
     };
 
-    return SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(
-            data,
-            SigningSecret()));
+    return SendPacket(data);
 #endif
 }
 
@@ -849,8 +885,7 @@ bool VoiceBridge::SendMapState(const char* map_name)
         .payload = {},
     };
 
-    return SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(data, SigningSecret()));
+    return SendPacket(data);
 #endif
 }
 
@@ -915,8 +950,7 @@ bool VoiceBridge::SendPlayerPosition(
         .payload = {},
     };
 
-    return SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(data, SigningSecret()));
+    return SendPacket(data);
 #endif
 }
 
@@ -1086,6 +1120,42 @@ void VoiceBridge::TickPresence()
 #endif
 }
 
+bool VoiceBridge::SendPacket(
+    const voicebridge::VoicePacketData& data,
+    std::uint64_t session_id)
+{
+#if !defined(__linux__)
+    (void)data;
+    (void)session_id;
+    return false;
+#else
+    bool sent = false;
+    if (session_id != kInvalidNeoPttSessionId)
+    {
+        sent = NeoPtt_SendVoicePacketTo(session_id, data);
+    }
+    else if (NeoPtt_HasPeer())
+    {
+        sent = NeoPtt_SendVoicePacket(data);
+    }
+    else if (socket_fd_ >= 0 && !shared_secret_.empty())
+    {
+        return SendDatagram(
+            voicebridge::BuildAuthenticatedVoicePacket(
+                data,
+                shared_secret_));
+    }
+
+    if (!sent)
+    {
+        dropped_packets_.fetch_add(
+            1,
+            std::memory_order_relaxed);
+    }
+    return sent;
+#endif
+}
+
 bool VoiceBridge::SendDatagram(
     const std::vector<std::uint8_t>& packet)
 {
@@ -1093,35 +1163,11 @@ bool VoiceBridge::SendDatagram(
     (void)packet;
     return false;
 #else
-    if (packet.empty())
-    {
-        dropped_packets_.fetch_add(
-            1,
-            std::memory_order_relaxed);
+    if (packet.empty() || socket_fd_ < 0)
         return false;
-    }
 
-    // Once Windows has authenticated itself with CONNECT/PTT,
-    // send all server->Windows traffic through the SAME UDP
-    // 27122 socket. This is important for NAT/firewall return
-    // traffic and removes dependency on a fixed Windows IP.
-    if (NeoPtt_HasPeer())
-    {
-        const bool sent =
-            NeoPtt_SendDatagram(packet);
-
-        if (!sent)
-        {
-            dropped_packets_.fetch_add(
-                1,
-                std::memory_order_relaxed);
-        }
-
-        return sent;
-    }
-
-    // Temporary legacy fallback until the dynamic CONNECT
-    // path is proven live.
+    // Legacy fixed-destination fallback for deployments which have not yet
+    // authenticated a dynamic UDP 27122 administrator session.
     const ssize_t sent = sendto(
         socket_fd_,
         packet.data(),

@@ -905,13 +905,20 @@ void ExecuteServerChoice(CCSPlayerController* player, const Actor& actor,
             Finish(player, actor, "Control bots", "server", false, "Permission denied.");
             return;
         }
-        const char* command = choice.kind == ChoiceKind::RemoveBots ? "bot_kick" :
-            choice.value == CS_TEAM_T ? "bot_add_t" : "bot_add_ct";
-        const char* action = choice.kind == ChoiceKind::RemoveBots ? "Remove bots" : "Add bot";
-        const char* message = choice.kind == ChoiceKind::RemoveBots ?
-            "Removing bots." : "Adding bot.";
+        if (choice.kind == ChoiceKind::RemoveBots)
+        {
+            const int removed = NeoAdmin_RemoveGameplayBots();
+            const std::string message = "Removed " +
+                std::to_string(removed) +
+                " gameplay bot(s); SourceTV was retained.";
+            Finish(player, actor, "Remove bots", "server", true,
+                message.c_str());
+            return;
+        }
+        const char* command = choice.value == CS_TEAM_T ?
+            "bot_add_t" : "bot_add_ct";
         g_pEngineServer2->ServerCommand(command);
-        Finish(player, actor, action, "server", true, message);
+        Finish(player, actor, "Add bot", "server", true, "Adding bot.");
         return;
     }
     if (!Has(actor.permissions, neo_admin::GamePermission::ControlMatch))

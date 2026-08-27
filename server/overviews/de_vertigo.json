@@ -1,0 +1,10 @@
+﻿{
+    "MapName":  "de_vertigo",
+    "DisplayName":  "Vertigo",
+    "PosX":  -3168,
+    "PosY":  1762,
+    "Scale":  4,
+    "Rotate":  false,
+    "ImageFile":  "de_vertigo.png",
+    "Notes":  "CS2 game-depot radar. Extra radar levels: de_vertigo_lower.png"
+}

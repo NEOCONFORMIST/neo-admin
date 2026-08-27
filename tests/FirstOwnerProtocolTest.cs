@@ -50,6 +50,44 @@ if (CryptographicOperations.FixedTimeEquals(
 
 byte[] adminSecret = Encoding.UTF8.GetBytes(
     "admin-action-secret-0123456789-ABCDEFG");
+string selector = BridgeCommandPacket.BuildAdminAccessSelector(adminSecret);
+if (selector.Length != 32 || !selector.StartsWith("key_", StringComparison.Ordinal))
+    return 4;
+const string operatorName = "Neo Conform";
+byte[] loginPacket = BridgeCommandPacket.BuildAdminLogin(
+    4567,
+    selector,
+    operatorName,
+    adminSecret);
+ReadOnlySpan<byte> loginHeader = loginPacket.AsSpan(0, 60);
+int loginAuthenticatedLength = loginPacket.Length - 32;
+byte[] expectedLoginTag = HMACSHA256.HashData(
+    adminSecret,
+    loginPacket.AsSpan(0, loginAuthenticatedLength));
+ushort loginNameLength = BinaryPrimitives.ReadUInt16LittleEndian(
+    loginHeader[48..50]);
+uint loginPayloadLength = BinaryPrimitives.ReadUInt32LittleEndian(
+    loginHeader[52..56]);
+if (loginHeader[5] != 15 ||
+    loginNameLength != Encoding.UTF8.GetByteCount(operatorName) ||
+    loginPayloadLength != Encoding.UTF8.GetByteCount(selector) ||
+    Encoding.UTF8.GetString(loginPacket.AsSpan(60, loginNameLength)) != operatorName ||
+    Encoding.UTF8.GetString(loginPacket.AsSpan(60 + loginNameLength, (int)loginPayloadLength)) != selector ||
+    !CryptographicOperations.FixedTimeEquals(
+        expectedLoginTag,
+        loginPacket.AsSpan(loginAuthenticatedLength, 32)))
+{
+    return 5;
+}
+byte[] legacyLoginPacket = BridgeCommandPacket.BuildAdminLogin(
+    4566,
+    selector,
+    adminSecret);
+if (BinaryPrimitives.ReadUInt16LittleEndian(
+        legacyLoginPacket.AsSpan(48, 2)) != 0)
+{
+    return 6;
+}
 byte[] givePacket = BridgeCommandPacket.BuildAdminAction(
     5678,
     AdminActionCode.GiveItem,

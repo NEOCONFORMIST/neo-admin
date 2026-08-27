@@ -1,6 +1,7 @@
 #include "neo_admin_accounts.h"
 #include "neo_admin_persistence.h"
 #include "neo_admin_permissions.h"
+#include "voicebridge_protocol.h"
 
 #include "vendor/nlohmann/json.hpp"
 
@@ -107,8 +108,12 @@ bool AccountStore::Load(
                 .enabled = true,
                 .uses_server_secret = true,
                 .secret = {},
+                .access_selector = {},
                 .created_utc = UtcNow(),
             });
+            accounts_.back().access_selector =
+                voicebridge::BuildAdminAccessSelector(
+                    ResolveSecret(accounts_.back()));
         }
 
         if (!Save(error))
@@ -231,6 +236,8 @@ bool AccountStore::Load(
             return false;
         }
 
+        account.access_selector = voicebridge::BuildAdminAccessSelector(
+            ResolveSecret(account));
         accounts_.push_back(std::move(account));
     }
 
@@ -261,6 +268,24 @@ const Account* AccountStore::Find(std::string_view id) const
         accounts_.end(),
         [&](const Account& account) { return account.id == id; });
     return found == accounts_.end() ? nullptr : &*found;
+}
+
+const Account* AccountStore::FindByAccessSelector(
+    std::string_view selector) const
+{
+    if (selector.size() != 32 || !selector.starts_with("key_"))
+        return nullptr;
+
+    const Account* match = nullptr;
+    for (const Account& account : accounts_)
+    {
+        if (account.access_selector != selector)
+            continue;
+        if (match)
+            return nullptr;
+        match = &account;
+    }
+    return match;
 }
 
 const Account* AccountStore::FindBySteamId(std::uint64_t steam_id) const
@@ -386,8 +411,12 @@ bool AccountStore::BootstrapOwner(
         .enabled = true,
         .uses_server_secret = false,
         .secret = std::string(access_key),
+        .access_selector = {},
         .created_utc = UtcNow(),
     });
+    accounts_.back().access_selector =
+        voicebridge::BuildAdminAccessSelector(
+            ResolveSecret(accounts_.back()));
 
     std::string save_error;
     if (!Save(save_error))
@@ -512,9 +541,13 @@ bool AccountStore::Upsert(
                 .enabled = enabled,
                 .uses_server_secret = false,
                 .secret = secret,
+                .access_selector = {},
                 .created_utc = UtcNow(),
                 .expires_unix = expires_unix,
             });
+            accounts_.back().access_selector =
+                voicebridge::BuildAdminAccessSelector(
+                    ResolveSecret(accounts_.back()));
         }
         else
         {
@@ -528,6 +561,9 @@ bool AccountStore::Upsert(
                 found->uses_server_secret = false;
                 found->secret = secret;
             }
+            found->access_selector =
+                voicebridge::BuildAdminAccessSelector(
+                    ResolveSecret(*found));
         }
 
         std::string save_error;

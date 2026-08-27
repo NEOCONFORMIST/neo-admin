@@ -296,6 +296,30 @@ bool ConstantTimeEqual(
 
 } // namespace
 
+std::string BuildAdminAccessSelector(
+    std::span<const std::uint8_t> account_secret)
+{
+    if (account_secret.empty())
+        return {};
+
+    constexpr std::string_view label =
+        "NEO ADMIN access selector v1";
+    const auto digest = HmacSha256(
+        account_secret,
+        std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(label.data()),
+            label.size()));
+    constexpr char hex[] = "0123456789abcdef";
+    std::string selector = "key_";
+    selector.reserve(32);
+    for (std::size_t index = 0; index < 14; ++index)
+    {
+        selector.push_back(hex[digest[index] >> 4U]);
+        selector.push_back(hex[digest[index] & 0x0fU]);
+    }
+    return selector;
+}
+
 std::vector<std::uint8_t> BuildAuthenticatedVoicePacket(
     const VoicePacketData& data,
     std::span<const std::uint8_t> shared_secret)
@@ -483,6 +507,7 @@ bool TryReadAdminLoginAccountId(
     std::string& account_id)
 {
     constexpr std::size_t kMaxAccountIdBytes = 32;
+    constexpr std::size_t kMaxDisplayNameBytes = 32;
 
     if (datagram.size() <= kHeaderSize + kAuthTagSize ||
         datagram[0] != 'C' || datagram[1] != 'V' ||
@@ -494,10 +519,11 @@ bool TryReadAdminLoginAccountId(
         return false;
     }
 
+    const std::uint16_t name_length = ReadU16(datagram, 48);
     const std::uint32_t payload_length = ReadU32(datagram, 52);
     if (payload_length < 3 || payload_length > kMaxAccountIdBytes ||
-        ReadU16(datagram, 48) != 0 || ReadU16(datagram, 50) != 0 ||
-        datagram.size() != kHeaderSize + payload_length + kAuthTagSize ||
+        name_length > kMaxDisplayNameBytes || ReadU16(datagram, 50) != 0 ||
+        datagram.size() != kHeaderSize + name_length + payload_length + kAuthTagSize ||
         ReadU64(datagram, 16) != 0 || ReadI32(datagram, 24) != -1 ||
         ReadU32(datagram, 28) != 0 || ReadI32(datagram, 32) != 0 ||
         ReadU32(datagram, 36) != 0 || ReadU32(datagram, 40) != 0 ||
@@ -506,7 +532,19 @@ bool TryReadAdminLoginAccountId(
         return false;
     }
 
-    const auto payload = datagram.subspan(kHeaderSize, payload_length);
+    const auto name = datagram.subspan(kHeaderSize, name_length);
+    for (const std::uint8_t byte : name)
+    {
+        if (byte == 0 || byte == '\r' || byte == '\n' ||
+            (byte < 0x20U && byte != '\t'))
+        {
+            return false;
+        }
+    }
+
+    const auto payload = datagram.subspan(
+        kHeaderSize + name_length,
+        payload_length);
     for (const std::uint8_t byte : payload)
     {
         if (!((byte >= 'a' && byte <= 'z') ||
@@ -550,6 +588,10 @@ bool TryParseAuthenticatedAdminLoginCommand(
     command.sequence = ReadU32(datagram, 8);
     command.unix_time = ReadU32(datagram, 12);
     command.account_id = std::move(account_id);
+    const std::uint16_t name_length = ReadU16(datagram, 48);
+    command.display_name.assign(
+        reinterpret_cast<const char*>(datagram.data() + kHeaderSize),
+        name_length);
     return true;
 }
 

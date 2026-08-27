@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -8,6 +9,14 @@
 
 #include "neo_admin_discipline.h"
 #include "neo_admin_operations.h"
+
+namespace voicebridge
+{
+    struct VoicePacketData;
+}
+
+using NeoPttSessionId = std::uint64_t;
+constexpr NeoPttSessionId kInvalidNeoPttSessionId = 0;
 
 struct NeoPttStats
 {
@@ -21,6 +30,7 @@ struct NeoPttStats
 
 struct NeoPttTeleportCommand
 {
+    NeoPttSessionId session_id = kInvalidNeoPttSessionId;
     std::uint32_t sequence = 0;
     std::uint32_t unix_time = 0;
     std::uint64_t steam_id = 0;
@@ -32,16 +42,19 @@ struct NeoPttTeleportCommand
 
 struct NeoPttAdminChatCommand
 {
+    NeoPttSessionId session_id = kInvalidNeoPttSessionId;
     std::uint32_t sequence = 0;
     std::uint32_t unix_time = 0;
     std::string message;
     std::string account_id;
+    std::string operator_name;
     bool authorized = false;
     std::string denial_message;
 };
 
 struct NeoPttAdminActionCommand
 {
+    NeoPttSessionId session_id = kInvalidNeoPttSessionId;
     std::uint32_t sequence = 0;
     std::uint32_t unix_time = 0;
 
@@ -51,6 +64,7 @@ struct NeoPttAdminActionCommand
 
     std::string text;
     std::string account_id;
+    std::string operator_name;
     std::uint64_t permissions = 0;
     bool authorized = false;
     std::string denial_message;
@@ -90,14 +104,16 @@ bool NeoPtt_TryPop(NeoPttFrame& frame);
 
 // Unified authenticated admin UDP transport.
 //
-// After CONNECT (or an authenticated PTT packet), all server-to-Windows
-// VoiceBridge datagrams are returned through the same UDP 27122 socket.
+// Every authenticated client keeps an independent endpoint, secret,
+// permission set, and replay window. Live events are broadcast to every
+// session; request replies are sent only to the originating session.
 bool NeoPtt_HasPeer();
-std::span<const std::uint8_t> NeoPtt_GetPeerSecret();
-std::string NeoPtt_GetActiveAccountId();
-std::uint64_t NeoPtt_GetActivePermissions();
-bool NeoPtt_SendDatagram(
-    const std::vector<std::uint8_t>& packet);
+std::size_t NeoPtt_GetPeerCount();
+bool NeoPtt_SendVoicePacket(
+    const voicebridge::VoicePacketData& data);
+bool NeoPtt_SendVoicePacketTo(
+    NeoPttSessionId session_id,
+    const voicebridge::VoicePacketData& data);
 
 bool NeoPtt_TakeAdminChat(
     NeoPttAdminChatCommand& command);
@@ -108,14 +124,16 @@ bool NeoPtt_TakeAdminAction(
 bool NeoPtt_TakeTeleport(
     NeoPttTeleportCommand& command);
 
-bool NeoPtt_SendAccountCatalog();
-bool NeoPtt_SendGameAdminCatalog();
-bool NeoPtt_SendAuditCatalog();
-bool NeoPtt_SendBanCatalog();
-bool NeoPtt_SendDisciplineCatalog();
-bool NeoPtt_SendDisciplineHistory(std::string_view steam_id);
-bool NeoPtt_SendMapRotationCatalog();
-bool NeoPtt_SendAnnouncementCatalog();
+bool NeoPtt_SendAccountCatalog(NeoPttSessionId session_id);
+bool NeoPtt_SendGameAdminCatalog(NeoPttSessionId session_id);
+bool NeoPtt_SendAuditCatalog(NeoPttSessionId session_id);
+bool NeoPtt_SendBanCatalog(NeoPttSessionId session_id);
+bool NeoPtt_SendDisciplineCatalog(NeoPttSessionId session_id);
+bool NeoPtt_SendDisciplineHistory(
+    NeoPttSessionId session_id,
+    std::string_view steam_id);
+bool NeoPtt_SendMapRotationCatalog(NeoPttSessionId session_id);
+bool NeoPtt_SendAnnouncementCatalog(NeoPttSessionId session_id);
 void NeoPtt_RecordAudit(
     std::string_view acting_account_id,
     std::string_view action,

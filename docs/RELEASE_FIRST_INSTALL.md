@@ -19,13 +19,36 @@ and it does not modify `gameinfo.gi`.
 3. Drag everything inside that folder into the server's existing `game/csgo`
    folder. Allow folders to merge and replace the old NEO ADMIN plugin files
    when updating.
-4. Allow inbound UDP port `27122` from the Windows administrator computer.
+4. Allow inbound UDP port `27122` on the Linux host. For direct Internet
+   access, forward router/firewall UDP port `27122` to this CS2 server.
 5. Restart CS2 and run `meta list` in its console. NEO ADMIN should appear.
 6. Find the one-time first-owner setup code in the startup console output.
 
 The included `addons/metamod/cs2fixes.vdf` file registers NEO ADMIN with an
 already installed Metamod. It is part of NEO ADMIN, not a bundled Metamod
 runtime.
+
+### CounterStrikeSharp compatibility
+
+NEO ADMIN and CounterStrikeSharp are separate Metamod plugins and may be loaded
+together. When CounterStrikeSharp is already installed, `meta list` should show
+both plugins after startup.
+
+Some CounterStrikeSharp Linux releases mark their loader as requiring an
+executable stack. Newer Linux hosts can reject that loader before either plugin
+has a chance to interact. The preferred server configuration is Steam Linux
+Runtime 3 (sniper). This release also includes
+`server/prepare-counterstrikesharp.sh` for hosts that launch the dedicated
+server directly:
+
+```bash
+sudo bash ./server/prepare-counterstrikesharp.sh --cs2-root /path/to/cs2
+```
+
+The tool requires `patchelf` 0.18 or newer, refuses to modify a running server,
+creates a timestamped backup, clears only CounterStrikeSharp's executable-stack
+ELF flag, and verifies the result. Run it again after updating
+CounterStrikeSharp because its loader may have been replaced.
 
 ## Windows application
 
@@ -42,6 +65,24 @@ account-management screens.
 No fixed Windows IP or shared secret is required. After authentication, map,
 player, chat, voice, and administration traffic returns through the same UDP
 connection initiated by the Windows app.
+
+## Remote and mobile administrators
+
+Install `android/NEO-ADMIN-Android-<version>.apk` on Android 8.0 or newer. The
+same APK is also published separately beside the release archives for easier
+phone installation.
+
+- In each client, save the server's public IPv4 address or DNS/DDNS name, not
+  the administrator device's address. Keep the NEO ADMIN UDP port at `27122`.
+- The server accepts authenticated clients from changing public IP addresses.
+  Each phone or computer gets an independent session, and several clients can
+  be connected at the same time.
+- Forward only `UDP 27122` to the CS2 server's private address. Do not forward
+  the client receive port `27120`.
+- A router without NAT loopback may require a separate LAN profile while the
+  device is at home. Outside the LAN, use the public address or DNS name.
+- A VPN such as WireGuard or Tailscale is preferred because protocol
+  authentication prevents forged commands but does not encrypt voice or chat.
 
 ## Updates and backups
 

@@ -1,0 +1,10 @@
+﻿{
+    "MapName":  "de_nuke",
+    "DisplayName":  "Nuke",
+    "PosX":  -3453,
+    "PosY":  2887,
+    "Scale":  7,
+    "Rotate":  false,
+    "ImageFile":  "de_nuke.png",
+    "Notes":  "CS2 game-depot radar. Extra radar levels: de_nuke_lower.png"
+}

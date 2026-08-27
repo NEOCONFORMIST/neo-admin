@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0-android</TargetFramework>
+    <SupportedOSPlatformVersion>26</SupportedOSPlatformVersion>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>NeoAdmin.AndroidApp</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationId>com.neoconformist.neoadmin</ApplicationId>
+    <ApplicationVersion>26</ApplicationVersion>
+    <ApplicationDisplayVersion>1.1.10</ApplicationDisplayVersion>
+    <AndroidPackageFormat>apk</AndroidPackageFormat>
+    <!--
+      Enables trim analyzers and full trimming during Release mode.
+      To learn more, see: https://learn.microsoft.com/dotnet/core/deploying/trimming/trimming-options#trimming-granularity
+    -->
+    <TrimMode>partial</TrimMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Concentus" Version="2.2.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\windows\NEO.Admin\AdminGiveItemCatalog.cs" Link="Shared\AdminGiveItemCatalog.cs" />
+    <Compile Include="..\..\windows\NEO.Admin\AdminPermissions.cs" Link="Shared\AdminPermissions.cs" />
+    <Compile Include="..\..\windows\NEO.Admin\AppConfig.cs" Link="Shared\AppConfig.cs" />
+    <Compile Include="..\..\windows\NEO.Admin\BridgeCommandPacket.cs" Link="Shared\BridgeCommandPacket.cs" />
+    <Compile Include="..\..\windows\NEO.Admin\FirstOwnerSetupClient.cs" Link="Shared\FirstOwnerSetupClient.cs" />
+    <Compile Include="..\..\windows\NEO.Admin\UdpVoiceReceiver.cs" Link="Shared\UdpVoiceReceiver.cs" />
+    <Compile Include="..\..\windows\NEO.Admin\VoicePacket.cs" Link="Shared\VoicePacket.cs" />
+  </ItemGroup>
+</Project>

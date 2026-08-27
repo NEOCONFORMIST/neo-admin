@@ -1354,6 +1354,12 @@ bool CAdminSystem::LoadAdmins()
 
 	if (!jsonFile.is_open())
 	{
+		if (!g_pFullFileSystem->FileExists(pszJsonPath))
+		{
+			Message("Optional legacy admin config %s is not present; using SQLite administrators only.\n", pszJsonPath);
+			return true;
+		}
+
 		Panic("Failed to open %s, admins are not loaded!\n", pszJsonPath);
 		return false;
 	}
@@ -1465,6 +1471,8 @@ bool CAdminSystem::LoadInfractions()
 	KeyValues::AutoDelete autoDelete(pKV);
 
 	const char* pszPath = "addons/cs2fixes/data/infractions.txt";
+	if (!g_pFullFileSystem->FileExists(pszPath))
+		return true;
 
 	if (!pKV->LoadFromFile(g_pFullFileSystem, pszPath))
 	{

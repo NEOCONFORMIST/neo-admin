@@ -1,0 +1,10 @@
+﻿{
+    "MapName":  "de_ancient",
+    "DisplayName":  "Ancient",
+    "PosX":  -2953,
+    "PosY":  2164,
+    "Scale":  5,
+    "Rotate":  false,
+    "ImageFile":  "de_ancient.png",
+    "Notes":  "CS2 game-depot radar. Extra radar levels: "
+}

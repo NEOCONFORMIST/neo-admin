@@ -24,6 +24,7 @@
 #include "iserver.h"
 #include "voicebridge.h"
 #include "voicebridge_map_catalog.h"
+#include "neo_map_overview_assets.h"
 #include "neo_admin_permissions.h"
 #include "neo_admin_give_items.h"
 #include "neo_ptt.h"
@@ -75,6 +76,7 @@ void NeoAdmin_ChangeStoredMap(const std::string& map)
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include "playermanager.h"
 #include "tier0/vprof.h"
@@ -124,7 +126,6 @@ std::uint64_t NeoAdmin_ParseWorkshopId(const std::string& token)
 enum class NeoAdminVoiceRelayKind
 {
 	None,
-	Bot,
 	SourceTv,
 };
 
@@ -133,15 +134,179 @@ NeoAdminVoiceRelayKind NeoAdmin_GetVoiceRelayKind(
 {
 	if (!controller || !controller->IsConnected())
 		return NeoAdminVoiceRelayKind::None;
-	const std::string name = controller->GetPlayerName();
-	if (controller->m_bIsHLTV() ||
-		!V_strcasecmp(name.c_str(), "SourceTV"))
-	{
+	if (controller->m_bIsHLTV())
 		return NeoAdminVoiceRelayKind::SourceTv;
+	return NeoAdminVoiceRelayKind::None;
+}
+
+void NeoAdmin_ProtectNativeSourceTv()
+{
+	static std::uint32_t check_counter = 0;
+	if ((++check_counter % 32) != 1 || !g_VoiceBridge.IsConfigured())
+		return;
+
+	static ConVarRefAbstract tv_enable("tv_enable", true);
+	static ConVarRefAbstract bot_auto_vacate("bot_auto_vacate", true);
+	static ConVarRefAbstract bot_quota_mode("bot_quota_mode", true);
+	if (!tv_enable.IsValidRef() || !bot_auto_vacate.IsValidRef() ||
+		!bot_quota_mode.IsValidRef() || tv_enable.GetInt() == 0)
+	{
+		return;
 	}
-	return controller->IsBot()
-		? NeoAdminVoiceRelayKind::Bot
-		: NeoAdminVoiceRelayKind::None;
+
+	// The client disconnect hook blocks CS2 from counting native SourceTV as
+	// the bot to vacate, so the normal fill behavior can remain enabled.
+	bool changed = false;
+	if (bot_auto_vacate.GetInt() != 1)
+	{
+		bot_auto_vacate.SetString(CUtlString("1"));
+		changed = true;
+	}
+	if (V_stricmp(bot_quota_mode.GetString(), "fill") != 0)
+	{
+		bot_quota_mode.SetString(CUtlString("fill"));
+		changed = true;
+	}
+	if (changed)
+	{
+		Message(
+			"[NEO PTT] Protected native SourceTV: "
+			"bot_auto_vacate=1 bot_quota_mode=fill.\n");
+	}
+}
+
+struct NeoAdminMapOverviewPackage
+{
+	std::string map_name;
+	std::vector<std::uint8_t> bytes;
+	std::uint32_t hash = 0;
+	std::uint32_t definition_length = 0;
+};
+
+bool NeoAdmin_NormalizeOverviewMapName(
+	std::string_view requested,
+	std::string& normalized)
+{
+	normalized.assign(requested);
+	std::replace(normalized.begin(), normalized.end(), '\\', '/');
+	const std::size_t separator = normalized.find_last_of('/');
+	if (separator != std::string::npos)
+		normalized.erase(0, separator + 1);
+	normalized = NeoAdmin_LowerAscii(std::move(normalized));
+
+	if (normalized.empty() || normalized.size() > 96)
+		return false;
+
+	return std::all_of(
+		normalized.begin(),
+		normalized.end(),
+		[](unsigned char character)
+		{
+			return std::isalnum(character) != 0 ||
+				character == '_' || character == '-';
+		});
+}
+
+bool NeoAdmin_ReadOverviewFile(
+	const std::filesystem::path& path,
+	std::size_t maximum_bytes,
+	std::vector<std::uint8_t>& bytes)
+{
+	std::ifstream file(path, std::ios::binary | std::ios::ate);
+	if (!file)
+		return false;
+
+	const std::streampos end = file.tellg();
+	if (end <= 0 ||
+		static_cast<std::uint64_t>(end) > maximum_bytes)
+	{
+		return false;
+	}
+
+	bytes.resize(static_cast<std::size_t>(end));
+	file.seekg(0, std::ios::beg);
+	file.read(
+		reinterpret_cast<char*>(bytes.data()),
+		static_cast<std::streamsize>(bytes.size()));
+	return file.good();
+}
+
+const NeoAdminMapOverviewPackage* NeoAdmin_GetMapOverviewPackage(
+	std::string_view requested,
+	std::string& error_message)
+{
+	static NeoAdminMapOverviewPackage cached;
+	std::string map_name;
+	if (!NeoAdmin_NormalizeOverviewMapName(requested, map_name))
+	{
+		error_message = "Invalid map overview name.";
+		return nullptr;
+	}
+
+	if (cached.map_name == map_name && !cached.bytes.empty())
+		return &cached;
+
+	const std::filesystem::path root =
+		std::filesystem::path(Plat_GetGameDirectory()) /
+		"csgo" / "addons" / "cs2fixes" / "overviews";
+	std::vector<std::uint8_t> definition;
+	std::vector<std::uint8_t> image;
+	const bool read_from_disk = NeoAdmin_ReadOverviewFile(
+			root / (map_name + ".json"),
+			64U * 1024U,
+			definition) &&
+		NeoAdmin_ReadOverviewFile(
+			root / (map_name + ".png"),
+			2U * 1024U * 1024U,
+			image);
+	if (!read_from_disk &&
+		!NeoAdmin_GetEmbeddedMapOverview(map_name, definition, image))
+	{
+		error_message = "No server-hosted overview is available for this map.";
+		return nullptr;
+	}
+
+	// JSON parsers consume the definition bytes directly from the package.
+	// Normalize UTF-8 files saved with a BOM before publishing them.
+	if (definition.size() >= 3U &&
+		definition[0] == 0xEFU &&
+		definition[1] == 0xBBU &&
+		definition[2] == 0xBFU)
+	{
+		definition.erase(definition.begin(), definition.begin() + 3);
+	}
+
+	if (definition.size() + image.size() + 4U >
+		2U * 1024U * 1024U)
+	{
+		error_message = "The server map overview package is too large.";
+		return nullptr;
+	}
+
+	NeoAdminMapOverviewPackage loaded;
+	loaded.map_name = map_name;
+	loaded.definition_length =
+		static_cast<std::uint32_t>(definition.size());
+	loaded.bytes.reserve(definition.size() + image.size() + 4U);
+	for (int shift = 0; shift < 32; shift += 8)
+	{
+		loaded.bytes.push_back(static_cast<std::uint8_t>(
+			loaded.definition_length >> shift));
+	}
+	loaded.bytes.insert(
+		loaded.bytes.end(), definition.begin(), definition.end());
+	loaded.bytes.insert(
+		loaded.bytes.end(), image.begin(), image.end());
+
+	std::uint32_t hash = 2166136261U;
+	for (const std::uint8_t byte : loaded.bytes)
+	{
+		hash ^= byte;
+		hash *= 16777619U;
+	}
+	loaded.hash = hash;
+	cached = std::move(loaded);
+	return &cached;
 }
 }
 
@@ -428,7 +593,8 @@ GS_EVENT_MEMBER(CGameSystem, BuildGameSessionManifest)
 	// Any resource adding MUST be done here, the resource manifest is not long-lived
 	// pResourceManifest->AddResource("characters/models/my_character_model.vmdl");
 
-	ZR_Precache(pResourceManifest);
+	if (kZombieSurvivalImplemented)
+		ZR_Precache(pResourceManifest);
 	PrecacheBeaconParticle(pResourceManifest);
 	Leader_Precache(pResourceManifest);
 
@@ -655,17 +821,41 @@ static bool NeoFindSafeTeleportDestination(
     return true;
 }
 
+int NeoAdmin_RemoveGameplayBots()
+{
+	if (!GetGlobals())
+		return 0;
+	int removed = 0;
+	for (int slot = 0; slot < GetGlobals()->maxClients; ++slot)
+	{
+		CCSPlayerController* controller =
+			CCSPlayerController::FromSlot(slot);
+		if (!controller || !controller->IsConnected() ||
+			!controller->IsBot() || controller->m_bIsHLTV())
+		{
+			continue;
+		}
+
+		g_pEngineServer2->DisconnectClient(
+			controller->GetPlayerSlot(),
+			NETWORK_DISCONNECT_KICKED,
+			"Removed by an administrator");
+		++removed;
+	}
+	return removed;
+}
+
 static void VoiceBridge_OnServerFrame()
 {
+	NeoAdmin_ProtectNativeSourceTv();
 
     // NEO PTT STAGE 3O HLTV DELAYED READ-ONLY PROBE BEGIN
     //
-    // Diagnostic only.
-    //
-    // Waits for SourceTV to finish connecting instead of
-    // scanning only once during early server startup.
+    // Waits for CS2's native SourceTV/HLTV controller to finish connecting
+    // instead of scanning only once during early server startup.
     //
     // NO bot creation.
+    // NO gameplay-bot fallback.
     // NO team changes.
     // NO network sending.
     // NO CServerSideClient.
@@ -700,8 +890,6 @@ static void VoiceBridge_OnServerFrame()
             ++neo_ptt_stage3o_scan_counter;
 
             CCSPlayerController* relay = nullptr;
-            NeoAdminVoiceRelayKind relay_kind =
-                NeoAdminVoiceRelayKind::None;
             int relay_slot = -1;
 
             if (neo_ptt_stage3o_scan_counter == 1 ||
@@ -728,22 +916,12 @@ static void VoiceBridge_OnServerFrame()
 
                 const NeoAdminVoiceRelayKind candidate_kind =
                     NeoAdmin_GetVoiceRelayKind(candidate);
-                if (candidate_kind == NeoAdminVoiceRelayKind::None)
+                if (candidate_kind != NeoAdminVoiceRelayKind::SourceTv)
                     continue;
 
-                // SourceTV is the stable, recognizable speaker when it is
-                // available. Some CS2 game modes now kick its controller
-                // during bot quota balancing, so retain the first real bot
-                // as a safe relay fallback.
-                if (!relay ||
-                    candidate_kind == NeoAdminVoiceRelayKind::SourceTv)
-                {
-                    relay = candidate;
-                    relay_kind = candidate_kind;
-                    relay_slot = slot;
-                }
-                if (candidate_kind == NeoAdminVoiceRelayKind::SourceTv)
-                    break;
+                relay = candidate;
+                relay_slot = slot;
+                break;
             }
 
             if (relay)
@@ -759,9 +937,7 @@ static void VoiceBridge_OnServerFrame()
                     "slot=%d entity=%d kind=%s team=%d name=\"%s\"\n",
                     neo_ptt_stage3r_cached_slot,
                     neo_ptt_stage3r_cached_entity,
-                    relay_kind == NeoAdminVoiceRelayKind::SourceTv
-                        ? "SourceTV"
-                        : "bot-fallback",
+                    "SourceTV",
                     relay->m_iTeamNum(),
                     relay_name.c_str());
 
@@ -773,7 +949,7 @@ static void VoiceBridge_OnServerFrame()
                 Warning(
                     "[NEO PTT] Stage 3O "
                     "voice relay probe TIMEOUT - "
-                    "no SourceTV or bot controller found; continuing to retry\n");
+                    "no native SourceTV/HLTV controller found; continuing to retry\n");
             }
         }
     }
@@ -843,8 +1019,8 @@ static void VoiceBridge_OnServerFrame()
 
     // NEO PTT STAGE 3R CACHED HLTV IDENTITY BEGIN
     //
-    // Uses SourceTV as the preferred speaker and a connected bot if CS2's
-    // game-mode quota removes the SourceTV controller.
+    // Uses only CS2's native SourceTV/HLTV controller. A gameplay bot is
+    // never borrowed, renamed, or moved between teams for voice relay duty.
     //
     // NO CServerSideClient.
     // NO GetClientBySlot().
@@ -1023,16 +1199,17 @@ static void VoiceBridge_OnServerFrame()
                                                 frame.payload.data()),
                                             frame.payload.size()));
 
-                                    audio->set_sequence_bytes(0);
+                                    audio->set_sequence_bytes(
+                                        frame.sequence_bytes);
 
-                                    static std::uint32_t neo_ptt_cs2_section = 1;
                                     audio->set_section_number(
-                                        neo_ptt_cs2_section++);
+                                        frame.section_number);
 
                                     audio->set_sample_rate(
                                         frame.sample_rate);
 
-                                    audio->set_uncompressed_sample_offset(0);
+                                    audio->set_uncompressed_sample_offset(
+                                        frame.uncompressed_sample_offset);
 
                                     audio->set_num_packets(1);
 
@@ -1204,12 +1381,14 @@ static void VoiceBridge_OnServerFrame()
                 90,
                 -1,
                 false,
-                chat.denial_message.c_str());
+                chat.denial_message.c_str(),
+                chat.session_id);
             continue;
         }
 
         NeoAdmin_BroadcastChat(
-            chat.message.c_str());
+            chat.message.c_str(),
+            chat.operator_name.c_str());
     }
     // NEO CHAT STAGE 3S GAME-FRAME DELIVERY END
     // NEO ADMIN CONTROL STAGE 3V FILESYSTEM MAP CONTROL BEGIN
@@ -1239,6 +1418,7 @@ static void VoiceBridge_OnServerFrame()
     //  48  Remove bots
     //  49  Request filesystem map catalog
     //  50  Request server health
+    //  51  Request a server-hosted map overview chunk
     // 141  Request Zombie Survival status
     // 142  Enable or disable Zombie Survival
     //
@@ -1337,18 +1517,26 @@ static void VoiceBridge_OnServerFrame()
                     command.action,
                     command.player_slot,
                     success,
-                    message);
+                    message,
+                    command.session_id);
 
                 const char* audit_action =
                     AuditActionName(command.action);
                 if (*audit_action)
                 {
-                    const char* audit_details =
+                    const char* result_details =
                         command.action == 140
                             ? (success
                                 ? "Console command executed."
                                 : "Console command rejected.")
                             : (message ? message : "");
+                    std::string audit_details;
+                    if (!command.operator_name.empty())
+                    {
+                        audit_details = "Operator " +
+                            command.operator_name + ". ";
+                    }
+                    audit_details += result_details;
                     NeoPtt_RecordAudit(
                         command.account_id,
                         audit_action,
@@ -1959,15 +2147,15 @@ static void VoiceBridge_OnServerFrame()
             // ---------------------------------------------
             case 48:
             {
+                const int removed = NeoAdmin_RemoveGameplayBots();
                 SendResult(
                     true,
-                    "Removing bots.");
-
-                g_pEngineServer2->ServerCommand(
-                    "bot_kick");
-
+                    removed == 1
+                        ? "Removed 1 gameplay bot; SourceTV was retained."
+                        : "Removed gameplay bots; SourceTV was retained.");
                 Message(
-                    "[NEO ADMIN] remove bots requested\n");
+                    "[NEO ADMIN] removed %d gameplay bots; native SourceTV retained\n",
+                    removed);
 
                 break;
             }
@@ -2035,7 +2223,8 @@ static void VoiceBridge_OnServerFrame()
                 const bool sent =
                     g_VoiceBridge.SendMapCatalog(
                         catalog,
-                        included);
+                        included,
+                        command.session_id);
 
                 if (sent)
                 {
@@ -2083,8 +2272,60 @@ static void VoiceBridge_OnServerFrame()
                     connected_players,
                     static_cast<std::uint32_t>(
                         GetGlobals()->maxClients),
-                    PLUGIN_FULL_VERSION);
+                    PLUGIN_FULL_VERSION,
+                    command.session_id);
 
+                break;
+            }
+
+
+            // ---------------------------------------------
+            // 51 - REQUEST MAP OVERVIEW CHUNK
+            // ---------------------------------------------
+            case 51:
+            {
+                constexpr std::size_t kChunkBytes = 1100;
+                std::string overview_error;
+                const NeoAdminMapOverviewPackage* package =
+                    NeoAdmin_GetMapOverviewPackage(
+                        command.text,
+                        overview_error);
+                if (!package)
+                {
+                    SendResult(false, overview_error.c_str());
+                    break;
+                }
+
+                const std::size_t chunk_count =
+                    (package->bytes.size() + kChunkBytes - 1U) /
+                    kChunkBytes;
+                if (command.value < 0 ||
+                    static_cast<std::size_t>(command.value) >= chunk_count)
+                {
+                    SendResult(false, "Invalid map overview chunk index.");
+                    break;
+                }
+
+                const std::size_t chunk_index =
+                    static_cast<std::size_t>(command.value);
+                const std::size_t offset = chunk_index * kChunkBytes;
+                const std::size_t length = std::min(
+                    kChunkBytes,
+                    package->bytes.size() - offset);
+                const bool sent = g_VoiceBridge.SendMapOverviewChunk(
+                    command.sequence,
+                    package->map_name,
+                    static_cast<std::uint32_t>(chunk_index),
+                    static_cast<std::uint32_t>(chunk_count),
+                    package->bytes.size(),
+                    package->hash,
+                    package->definition_length,
+                    std::span<const std::uint8_t>(
+                        package->bytes.data() + offset,
+                        length),
+                    command.session_id);
+                if (!sent)
+                    SendResult(false, "Map overview chunk reply failed.");
                 break;
             }
 
@@ -2094,7 +2335,7 @@ static void VoiceBridge_OnServerFrame()
             // ---------------------------------------------
             case 100:
             {
-                const bool sent = NeoPtt_SendAccountCatalog();
+                const bool sent = NeoPtt_SendAccountCatalog(command.session_id);
                 SendResult(
                     sent,
                     sent
@@ -2116,7 +2357,7 @@ static void VoiceBridge_OnServerFrame()
                     message);
                 SendResult(saved, message.c_str());
                 if (saved)
-                    (void)NeoPtt_SendAccountCatalog();
+                    (void)NeoPtt_SendAccountCatalog(command.session_id);
                 break;
             }
 
@@ -2133,7 +2374,7 @@ static void VoiceBridge_OnServerFrame()
                     message);
                 SendResult(removed, message.c_str());
                 if (removed)
-                    (void)NeoPtt_SendAccountCatalog();
+                    (void)NeoPtt_SendAccountCatalog(command.session_id);
                 break;
             }
 
@@ -2143,7 +2384,7 @@ static void VoiceBridge_OnServerFrame()
             // ---------------------------------------------
             case 103:
             {
-                const bool sent = NeoPtt_SendAuditCatalog();
+                const bool sent = NeoPtt_SendAuditCatalog(command.session_id);
                 SendResult(
                     sent,
                     sent ? "Audit log refreshed." : "Audit log reply failed.");
@@ -2155,7 +2396,7 @@ static void VoiceBridge_OnServerFrame()
             // ---------------------------------------------
             case 104:
             {
-                const bool sent = NeoPtt_SendGameAdminCatalog();
+                const bool sent = NeoPtt_SendGameAdminCatalog(command.session_id);
                 SendResult(
                     sent,
                     sent
@@ -2170,7 +2411,7 @@ static void VoiceBridge_OnServerFrame()
                 const bool saved = NeoPtt_SaveGameAdmin(command.text, message);
                 SendResult(saved, message.c_str());
                 if (saved)
-                    (void)NeoPtt_SendGameAdminCatalog();
+                    (void)NeoPtt_SendGameAdminCatalog(command.session_id);
                 break;
             }
 
@@ -2180,7 +2421,7 @@ static void VoiceBridge_OnServerFrame()
                 const bool removed = NeoPtt_DeleteGameAdmin(command.text, message);
                 SendResult(removed, message.c_str());
                 if (removed)
-                    (void)NeoPtt_SendGameAdminCatalog();
+                    (void)NeoPtt_SendGameAdminCatalog(command.session_id);
                 break;
             }
 
@@ -2190,7 +2431,7 @@ static void VoiceBridge_OnServerFrame()
             // ---------------------------------------------
             case 110:
             {
-                const bool sent = NeoPtt_SendBanCatalog();
+                const bool sent = NeoPtt_SendBanCatalog(command.session_id);
                 SendResult(
                     sent,
                     sent ? "Ban list refreshed." : "Ban list reply failed.");
@@ -2215,7 +2456,7 @@ static void VoiceBridge_OnServerFrame()
                 if (!saved)
                     break;
 
-                (void)NeoPtt_SendBanCatalog();
+                (void)NeoPtt_SendBanCatalog(command.session_id);
                 if (command.player_slot < 0 ||
                     command.player_slot >= MAXPLAYERS)
                 {
@@ -2256,7 +2497,7 @@ static void VoiceBridge_OnServerFrame()
                     message);
                 SendResult(removed, message.c_str());
                 if (removed)
-                    (void)NeoPtt_SendBanCatalog();
+                    (void)NeoPtt_SendBanCatalog(command.session_id);
                 break;
             }
 
@@ -2266,7 +2507,7 @@ static void VoiceBridge_OnServerFrame()
             // ---------------------------------------------
             case 113:
             {
-                const bool sent = NeoPtt_SendDisciplineCatalog();
+                const bool sent = NeoPtt_SendDisciplineCatalog(command.session_id);
                 SendResult(sent, sent ? "Mute and gag list refreshed."
                     : "Mute and gag list reply failed.");
                 break;
@@ -2314,7 +2555,7 @@ static void VoiceBridge_OnServerFrame()
                 audit_target = restriction.player_name + " (" +
                     std::to_string(restriction.steam_id) + ")";
                 SendResult(true, message.c_str());
-                (void)NeoPtt_SendDisciplineCatalog();
+                (void)NeoPtt_SendDisciplineCatalog(command.session_id);
                 break;
             }
 
@@ -2356,7 +2597,7 @@ static void VoiceBridge_OnServerFrame()
                 audit_target = restriction.player_name + " (" +
                     std::to_string(restriction.steam_id) + ")";
                 SendResult(true, message.c_str());
-                (void)NeoPtt_SendDisciplineCatalog();
+                (void)NeoPtt_SendDisciplineCatalog(command.session_id);
                 break;
             }
 
@@ -2366,7 +2607,9 @@ static void VoiceBridge_OnServerFrame()
             // ---------------------------------------------
             case 116:
             {
-                const bool sent = NeoPtt_SendDisciplineHistory(command.text);
+                const bool sent = NeoPtt_SendDisciplineHistory(
+                    command.session_id,
+                    command.text);
                 SendResult(sent, sent ? "Player discipline history refreshed."
                     : "Player discipline history reply failed.");
                 break;
@@ -2375,7 +2618,7 @@ static void VoiceBridge_OnServerFrame()
 
             case 120:
             {
-                const bool sent = NeoPtt_SendMapRotationCatalog();
+                const bool sent = NeoPtt_SendMapRotationCatalog(command.session_id);
                 SendResult(sent, sent ? "Map rotation refreshed." : "Map rotation reply failed.");
                 break;
             }
@@ -2400,7 +2643,7 @@ static void VoiceBridge_OnServerFrame()
                     command.text, allowed, command.account_id, message);
                 SendResult(saved, message.c_str());
                 if (saved)
-                    (void)NeoPtt_SendMapRotationCatalog();
+                    (void)NeoPtt_SendMapRotationCatalog(command.session_id);
                 break;
             }
 
@@ -2435,7 +2678,7 @@ static void VoiceBridge_OnServerFrame()
 						break;
 					}
 					SendResult(true, message.c_str());
-                    (void)NeoPtt_SendMapRotationCatalog();
+                    (void)NeoPtt_SendMapRotationCatalog(command.session_id);
                     NeoAdmin_ChangeStoredMap(due.map);
                 }
 				else
@@ -2465,7 +2708,7 @@ static void VoiceBridge_OnServerFrame()
                     command.text, allowed, command.account_id, message);
                 SendResult(saved, message.c_str());
                 if (saved)
-                    (void)NeoPtt_SendMapRotationCatalog();
+                    (void)NeoPtt_SendMapRotationCatalog(command.session_id);
                 break;
             }
 
@@ -2476,13 +2719,13 @@ static void VoiceBridge_OnServerFrame()
                 audit_target = "schedule " + command.text;
                 SendResult(removed, message.c_str());
                 if (removed)
-                    (void)NeoPtt_SendMapRotationCatalog();
+                    (void)NeoPtt_SendMapRotationCatalog(command.session_id);
                 break;
             }
 
             case 130:
             {
-                const bool sent = NeoPtt_SendAnnouncementCatalog();
+                const bool sent = NeoPtt_SendAnnouncementCatalog(command.session_id);
                 SendResult(sent, sent ? "Announcements refreshed." : "Announcement reply failed.");
                 break;
             }
@@ -2510,7 +2753,7 @@ static void VoiceBridge_OnServerFrame()
                     command.text, command.account_id, message);
                 SendResult(saved, message.c_str());
                 if (saved)
-                    (void)NeoPtt_SendAnnouncementCatalog();
+                    (void)NeoPtt_SendAnnouncementCatalog(command.session_id);
                 break;
             }
 
@@ -2521,7 +2764,7 @@ static void VoiceBridge_OnServerFrame()
                 audit_target = "announcement " + command.text;
                 SendResult(removed, message.c_str());
                 if (removed)
-                    (void)NeoPtt_SendAnnouncementCatalog();
+                    (void)NeoPtt_SendAnnouncementCatalog(command.session_id);
                 break;
             }
 
@@ -2546,6 +2789,14 @@ static void VoiceBridge_OnServerFrame()
                         "Console commands must be 1-2048 characters on one line.");
                     break;
                 }
+
+                Message(
+                    "[NEO ADMIN] %s (%s) ran server console command: %s\n",
+                    command.operator_name.empty()
+                        ? command.account_id.c_str()
+                        : command.operator_name.c_str(),
+                    command.account_id.c_str(),
+                    audit_target.c_str());
 
                 std::string output;
                 const bool executed =

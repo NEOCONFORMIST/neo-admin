@@ -13,6 +13,11 @@
 #include <sys/socket.h>
 #endif
 
+namespace voicebridge
+{
+    struct VoicePacketData;
+}
+
 class VoiceBridge
 {
 public:
@@ -71,18 +76,32 @@ public:
         std::uint32_t action,
         std::int32_t player_slot,
         bool success,
-        const char* message);
+        const char* message,
+        std::uint64_t session_id);
 
     bool SendMapCatalog(
         std::string_view catalog,
-        std::uint32_t map_count);
+        std::uint32_t map_count,
+        std::uint64_t session_id);
+
+    bool SendMapOverviewChunk(
+        std::uint32_t request_sequence,
+        std::string_view map_name,
+        std::uint32_t chunk_index,
+        std::uint32_t chunk_count,
+        std::uint64_t package_length,
+        std::uint32_t package_hash,
+        std::uint32_t definition_length,
+        std::span<const std::uint8_t> chunk,
+        std::uint64_t session_id);
 
     bool SendServerHealth(
         std::uint32_t request_sequence,
         std::uint32_t current_tick,
         std::int32_t connected_players,
         std::uint32_t max_players,
-        const char* plugin_version);
+        const char* plugin_version,
+        std::uint64_t session_id);
 
     bool SendChatMessage(
         std::int32_t player_slot,
@@ -138,9 +157,11 @@ private:
         const char* player_name);
 
     bool SendMapState(const char* map_name);
+    bool SendPacket(
+        const voicebridge::VoicePacketData& data,
+        std::uint64_t session_id = 0);
     bool SendDatagram(const std::vector<std::uint8_t>& packet);
     bool HasOutputTransport() const;
-    std::span<const std::uint8_t> SigningSecret() const;
 
     int socket_fd_ = -1;
 #if defined(__linux__)

@@ -35,6 +35,9 @@ internal enum AdminActionCode : uint
 
     // Request an authenticated type-14 health snapshot.
     RequestServerHealth = 50,
+
+    // Request one authenticated chunk of a server-hosted map overview.
+    RequestMapOverview = 51,
     RequestAdminAccounts = 100,
     SaveAdminAccount = 101,
     DeleteAdminAccount = 102,
@@ -183,9 +186,26 @@ internal static class BridgeCommandPacket
         string accountId,
         ReadOnlySpan<byte> secret)
     {
+        return BuildAdminLogin(sequence, accountId, string.Empty, secret);
+    }
+
+    public static byte[] BuildAdminLogin(
+        uint sequence,
+        string accountId,
+        string displayName,
+        ReadOnlySpan<byte> secret)
+    {
         if (secret.IsEmpty)
             throw new InvalidOperationException(
                 "SharedSecret is empty.");
+
+        displayName = displayName.Trim();
+        byte[] name = Encoding.UTF8.GetBytes(displayName);
+        if (name.Length > 32 || displayName.Any(char.IsControl))
+        {
+            throw new InvalidDataException(
+                "Name must be no more than 32 UTF-8 bytes without control characters.");
+        }
 
         byte[] payload = Encoding.UTF8.GetBytes(accountId.Trim());
         if (payload.Length is < 3 or > 32 ||
@@ -198,7 +218,7 @@ internal static class BridgeCommandPacket
             throw new InvalidDataException("Administrator account ID is invalid.");
         }
 
-        int authenticatedLength = HeaderSize + payload.Length;
+        int authenticatedLength = HeaderSize + name.Length + payload.Length;
         byte[] datagram = new byte[authenticatedLength + AuthTagSize];
 
         Span<byte> header =
@@ -231,11 +251,16 @@ internal static class BridgeCommandPacket
             header[24..28],
             -1);
 
+        BinaryPrimitives.WriteUInt16LittleEndian(
+            header[48..50],
+            checked((ushort)name.Length));
+
         BinaryPrimitives.WriteUInt32LittleEndian(
             header[52..56],
             checked((uint)payload.Length));
 
-        payload.CopyTo(datagram.AsSpan(HeaderSize, payload.Length));
+        name.CopyTo(datagram.AsSpan(HeaderSize, name.Length));
+        payload.CopyTo(datagram.AsSpan(HeaderSize + name.Length, payload.Length));
 
         using var hmac =
             new HMACSHA256(secret.ToArray());
@@ -251,6 +276,20 @@ internal static class BridgeCommandPacket
             authenticatedLength);
 
         return datagram;
+    }
+
+    public static string BuildAdminAccessSelector(
+        ReadOnlySpan<byte> secret)
+    {
+        if (secret.IsEmpty)
+            throw new InvalidOperationException("Access key is empty.");
+
+        byte[] digest = HMACSHA256.HashData(
+            secret,
+            "NEO ADMIN access selector v1"u8);
+        return "key_" + Convert
+            .ToHexString(digest.AsSpan(0, 14))
+            .ToLowerInvariant();
     }
 
     public static byte[] BuildTeleport(

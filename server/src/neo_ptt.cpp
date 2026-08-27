@@ -45,7 +45,6 @@ namespace
     char g_error[256] = {};
 
     std::vector<std::uint8_t> g_secret;
-    std::vector<std::uint8_t> g_peer_secret;
     std::vector<std::uint8_t> g_first_owner_setup_secret;
     std::string g_first_owner_setup_code;
     std::string g_bootstrap_claimed_account_id;
@@ -61,15 +60,11 @@ namespace
     std::string g_bans_path;
     std::string g_discipline_path;
     std::string g_operations_path;
-    std::string g_active_account_id;
-    std::string g_active_display_name;
-    std::string g_active_role;
-    std::uint64_t g_active_permissions = 0;
     NeoPttStats g_stats{};
     std::uint32_t g_server_sequence = 0;
 
-    NeoPttFrame g_pending_frame{};
-    bool g_has_pending_frame = false;
+    constexpr std::size_t kMaxPendingPttFrames = 128;
+    std::deque<NeoPttFrame> g_pending_frames{};
 
     NeoPttTeleportCommand g_pending_teleport{};
     bool g_has_pending_teleport = false;
@@ -86,21 +81,32 @@ namespace
     std::deque<NeoPttAdminActionCommand>
         g_pending_admin_actions{};
 
-    sockaddr_storage g_peer{};
-    socklen_t g_peer_length = 0;
-    bool g_has_peer = false;
+    constexpr std::size_t kMaxAdminSessions = 16;
 
-    std::uint32_t g_last_connect_sequence = 0;
-    std::uint32_t g_last_connect_time = 0;
+    struct AdminSessionState
+    {
+        NeoPttSessionId id = kInvalidNeoPttSessionId;
+        sockaddr_storage endpoint{};
+        socklen_t endpoint_length = 0;
+        std::vector<std::uint8_t> secret;
+        std::string account_id;
+        std::string operator_name;
+        std::string role;
+        std::uint64_t permissions = 0;
+        std::uint32_t last_connect_sequence = 0;
+        std::uint32_t last_connect_time = 0;
+        std::uint32_t last_teleport_sequence = 0;
+        std::uint32_t last_teleport_time = 0;
+        std::uint32_t last_admin_chat_sequence = 0;
+        std::uint32_t last_admin_chat_time = 0;
+        std::uint32_t last_admin_action_sequence = 0;
+        std::uint32_t last_admin_action_time = 0;
+        std::uint64_t activity_order = 0;
+    };
 
-    std::uint32_t g_last_teleport_sequence = 0;
-    std::uint32_t g_last_teleport_time = 0;
-
-    std::uint32_t g_last_admin_chat_sequence = 0;
-    std::uint32_t g_last_admin_chat_time = 0;
-
-    std::uint32_t g_last_admin_action_sequence = 0;
-    std::uint32_t g_last_admin_action_time = 0;
+    std::vector<AdminSessionState> g_sessions;
+    NeoPttSessionId g_next_session_id = 1;
+    std::uint64_t g_session_activity_order = 0;
 
 
     void SetError(const char* prefix)
@@ -228,31 +234,167 @@ namespace
               sent > current + 15U);
     }
 
-    bool SetPeer(
+    void ClearSession(AdminSessionState& session)
+    {
+        ClearSensitiveBytes(session.secret);
+        session = {};
+    }
+
+    void ClearSessions()
+    {
+        for (AdminSessionState& session : g_sessions)
+            ClearSession(session);
+        g_sessions.clear();
+        g_next_session_id = 1;
+        g_session_activity_order = 0;
+    }
+
+    AdminSessionState* FindSessionByEndpoint(
         const sockaddr_storage& sender,
         socklen_t sender_length)
+    {
+        const auto found = std::find_if(
+            g_sessions.begin(),
+            g_sessions.end(),
+            [&](const AdminSessionState& session)
+            {
+                return SameUdpEndpoint(
+                    sender,
+                    sender_length,
+                    session.endpoint,
+                    session.endpoint_length);
+            });
+        return found == g_sessions.end() ? nullptr : &*found;
+    }
+
+    AdminSessionState* FindSessionById(NeoPttSessionId session_id)
+    {
+        if (session_id == kInvalidNeoPttSessionId)
+            return nullptr;
+        const auto found = std::find_if(
+            g_sessions.begin(),
+            g_sessions.end(),
+            [session_id](const AdminSessionState& session)
+            {
+                return session.id == session_id;
+            });
+        return found == g_sessions.end() ? nullptr : &*found;
+    }
+
+    void RemoveSession(NeoPttSessionId session_id)
+    {
+        const auto found = std::find_if(
+            g_sessions.begin(),
+            g_sessions.end(),
+            [session_id](const AdminSessionState& session)
+            {
+                return session.id == session_id;
+            });
+        if (found == g_sessions.end())
+            return;
+        ClearSession(*found);
+        g_sessions.erase(found);
+    }
+
+    bool RefreshSession(AdminSessionState& session)
+    {
+        const neo_admin::Account* account =
+            g_accounts.Find(session.account_id);
+        if (!account || !account->enabled || g_accounts.IsExpired(*account))
+            return false;
+
+        const std::vector<std::uint8_t> current_secret =
+            g_accounts.ResolveSecret(*account);
+        if (current_secret != session.secret)
+            return false;
+
+        session.role = account->role;
+        session.permissions = account->permissions;
+        return true;
+    }
+
+    AdminSessionState* FindAuthorizedSession(
+        NeoPttSessionId session_id,
+        neo_admin::Permission permission)
+    {
+        AdminSessionState* session = FindSessionById(session_id);
+        if (!session)
+            return nullptr;
+        if (!RefreshSession(*session))
+        {
+            RemoveSession(session_id);
+            return nullptr;
+        }
+        return neo_admin::HasPermission(session->permissions, permission)
+            ? session
+            : nullptr;
+    }
+
+    AdminSessionState* UpsertSession(
+        const sockaddr_storage& sender,
+        socklen_t sender_length,
+        const neo_admin::Account& account,
+        std::string_view operator_name,
+        std::vector<std::uint8_t> secret,
+        std::uint32_t connect_sequence,
+        std::uint32_t connect_time)
     {
         if (sender.ss_family != AF_INET ||
             sender_length < sizeof(sockaddr_in))
         {
-            return false;
+            return nullptr;
         }
 
-        std::memset(
-            &g_peer,
-            0,
-            sizeof(g_peer));
+        AdminSessionState* session =
+            FindSessionByEndpoint(sender, sender_length);
+        if (!session)
+        {
+            if (g_sessions.size() >= kMaxAdminSessions)
+            {
+                const auto oldest = std::min_element(
+                    g_sessions.begin(),
+                    g_sessions.end(),
+                    [](const AdminSessionState& left,
+                        const AdminSessionState& right)
+                    {
+                        return left.activity_order < right.activity_order;
+                    });
+                ClearSession(*oldest);
+                g_sessions.erase(oldest);
+            }
 
-        std::memcpy(
-            &g_peer,
-            &sender,
-            sizeof(sockaddr_in));
+            AdminSessionState created{};
+            g_sessions.push_back(std::move(created));
+            session = &g_sessions.back();
+        }
 
-        g_peer_length =
-            sizeof(sockaddr_in);
-
-        g_has_peer = true;
-        return true;
+        ClearSensitiveBytes(session->secret);
+        // A successful re-login replaces only this endpoint and receives a
+        // fresh identity. Any command queued by its previous credentials can
+        // no longer send a reply into the new account session.
+        session->id = g_next_session_id++;
+        if (session->id == kInvalidNeoPttSessionId)
+            session->id = g_next_session_id++;
+        session->endpoint = {};
+        std::memcpy(&session->endpoint, &sender, sizeof(sockaddr_in));
+        session->endpoint_length = sizeof(sockaddr_in);
+        session->secret = std::move(secret);
+        session->account_id = account.id;
+        session->operator_name = operator_name.empty()
+            ? account.display_name
+            : std::string(operator_name);
+        session->role = account.role;
+        session->permissions = account.permissions;
+        session->last_connect_sequence = connect_sequence;
+        session->last_connect_time = connect_time;
+        session->last_teleport_sequence = 0;
+        session->last_teleport_time = 0;
+        session->last_admin_chat_sequence = 0;
+        session->last_admin_chat_time = 0;
+        session->last_admin_action_sequence = 0;
+        session->last_admin_action_time = 0;
+        session->activity_order = ++g_session_activity_order;
+        return session;
     }
 
     std::uint32_t RoleCode(std::string_view role)
@@ -294,8 +436,11 @@ namespace
         const neo_admin::Account& account,
         std::span<const std::uint8_t> account_secret,
         bool success,
-        std::string_view message)
+        std::string_view message,
+        std::string_view display_name = {})
     {
+        if (display_name.empty())
+            display_name = account.display_name;
         voicebridge::VoicePacketData data{
             .message_type = voicebridge::kMessageAdminSession,
             .flags = static_cast<std::uint8_t>(success ? 0x01U : 0U),
@@ -303,7 +448,7 @@ namespace
             .tick = RoleCode(account.role),
             .steam_id = account.permissions,
             .player_slot = -1,
-            .player_name = account.display_name,
+            .player_name = display_name,
             .payload = std::span<const std::uint8_t>(
                 reinterpret_cast<const std::uint8_t*>(message.data()),
                 message.size()),
@@ -336,6 +481,7 @@ namespace
                 return neo_admin::Permission::ControlBots;
             case 49:
             case 50:
+            case 51:
                 return neo_admin::Permission::ViewDashboard;
             case 100:
             case 101:
@@ -379,18 +525,6 @@ namespace
         }
     }
 
-    void ClearPeer()
-    {
-        g_peer = {};
-        g_peer_length = 0;
-        g_has_peer = false;
-        std::fill(g_peer_secret.begin(), g_peer_secret.end(), 0);
-        g_peer_secret.clear();
-        g_active_account_id.clear();
-        g_active_display_name.clear();
-        g_active_role.clear();
-        g_active_permissions = 0;
-    }
 }
 
 bool NeoPtt_Start()
@@ -403,8 +537,7 @@ bool NeoPtt_Start()
     g_stats = {};
     g_server_sequence = 0;
 
-    g_pending_frame = {};
-    g_has_pending_frame = false;
+    g_pending_frames.clear();
 
     g_pending_teleport = {};
     g_has_pending_teleport = false;
@@ -412,19 +545,7 @@ bool NeoPtt_Start()
     g_pending_admin_chats.clear();
     g_pending_admin_actions.clear();
 
-    ClearPeer();
-
-    g_last_connect_sequence = 0;
-    g_last_connect_time = 0;
-
-    g_last_teleport_sequence = 0;
-    g_last_teleport_time = 0;
-
-    g_last_admin_chat_sequence = 0;
-    g_last_admin_chat_time = 0;
-
-    g_last_admin_action_sequence = 0;
-    g_last_admin_action_time = 0;
+    ClearSessions();
 
     ClearFirstOwnerSetup();
 
@@ -675,10 +796,9 @@ void NeoPtt_Shutdown()
 
     g_port = 0;
 
-    ClearPeer();
+    ClearSessions();
 
-    g_pending_frame = {};
-    g_has_pending_frame = false;
+    g_pending_frames.clear();
 
     g_pending_teleport = {};
     g_has_pending_teleport = false;
@@ -717,49 +837,60 @@ const char* NeoPtt_GetFirstOwnerSetupCode()
 
 bool NeoPtt_HasPeer()
 {
-    return
-        g_socket >= 0 &&
-        g_has_peer &&
-        g_peer_length > 0;
+    return g_socket >= 0 && !g_sessions.empty();
 }
 
-std::span<const std::uint8_t> NeoPtt_GetPeerSecret()
+std::size_t NeoPtt_GetPeerCount()
 {
-    return g_peer_secret;
+    return g_socket >= 0 ? g_sessions.size() : 0;
 }
 
-std::string NeoPtt_GetActiveAccountId()
+bool NeoPtt_SendVoicePacket(
+    const voicebridge::VoicePacketData& data)
 {
-    return g_active_account_id;
-}
+    if (g_socket < 0)
+        return false;
 
-std::uint64_t NeoPtt_GetActivePermissions()
-{
-    return g_active_permissions;
-}
-
-bool NeoPtt_SendDatagram(
-    const std::vector<std::uint8_t>& packet)
-{
-    if (!NeoPtt_HasPeer() ||
-        packet.empty())
+    bool sent_any = false;
+    std::size_t index = 0;
+    while (index < g_sessions.size())
     {
+        AdminSessionState& session = g_sessions[index];
+        if (!RefreshSession(session))
+        {
+            const NeoPttSessionId invalid_id = session.id;
+            RemoveSession(invalid_id);
+            continue;
+        }
+
+        const std::vector<std::uint8_t> packet =
+            voicebridge::BuildAuthenticatedVoicePacket(data, session.secret);
+        sent_any = SendPacketTo(
+            session.endpoint,
+            session.endpoint_length,
+            packet) || sent_any;
+        ++index;
+    }
+    return sent_any;
+}
+
+bool NeoPtt_SendVoicePacketTo(
+    NeoPttSessionId session_id,
+    const voicebridge::VoicePacketData& data)
+{
+    AdminSessionState* session = FindSessionById(session_id);
+    if (!session)
+        return false;
+    if (!RefreshSession(*session))
+    {
+        RemoveSession(session_id);
         return false;
     }
 
-    const ssize_t sent =
-        ::sendto(
-            g_socket,
-            packet.data(),
-            packet.size(),
-            MSG_DONTWAIT,
-            reinterpret_cast<const sockaddr*>(
-                &g_peer),
-            g_peer_length);
-
-    return
-        sent ==
-        static_cast<ssize_t>(packet.size());
+    return SendPacketTo(
+        session->endpoint,
+        session->endpoint_length,
+        voicebridge::BuildAuthenticatedVoicePacket(data, session->secret));
 }
 
 std::uint64_t NeoPtt_Poll()
@@ -912,6 +1043,11 @@ std::uint64_t NeoPtt_Poll()
                 g_accounts.Find(claimed_account_id);
             if (!account)
             {
+                account = g_accounts.FindByAccessSelector(
+                    claimed_account_id);
+            }
+            if (!account)
+            {
                 ++g_stats.rejected;
                 continue;
             }
@@ -944,19 +1080,19 @@ std::uint64_t NeoPtt_Poll()
                 continue;
             }
 
-            if (!SetPeer(sender, sender_length))
+            AdminSessionState* session = UpsertSession(
+                sender,
+                sender_length,
+                *account,
+                login.display_name,
+                std::move(account_secret),
+                login.sequence,
+                login.unix_time);
+            if (!session)
             {
                 ++g_stats.rejected;
                 continue;
             }
-
-            g_peer_secret = std::move(account_secret);
-            g_active_account_id = account->id;
-            g_active_display_name = account->display_name;
-            g_active_role = account->role;
-            g_active_permissions = account->permissions;
-            g_last_connect_sequence = login.sequence;
-            g_last_connect_time = login.unix_time;
 
             if (account->id == g_bootstrap_claimed_account_id)
                 ClearFirstOwnerSetup();
@@ -965,9 +1101,10 @@ std::uint64_t NeoPtt_Poll()
                 sender,
                 sender_length,
                 *account,
-                g_peer_secret,
+                session->secret,
                 true,
-                account->id);
+                account->id,
+                session->operator_name);
 
             ++g_stats.authenticated;
             g_stats.last_sequence = login.sequence;
@@ -975,32 +1112,33 @@ std::uint64_t NeoPtt_Poll()
             continue;
         }
 
-        // Revalidate every authenticated session so temporary access stops
-        // immediately when its expiration time is reached.
-        if (g_has_peer && !g_active_account_id.empty())
+        // Revalidate the session associated with this endpoint so disabled,
+        // expired, deleted, or re-keyed accounts stop immediately without
+        // disturbing any other connected administrator.
+        AdminSessionState* session =
+            FindSessionByEndpoint(sender, sender_length);
+        if (session && !RefreshSession(*session))
         {
             const neo_admin::Account* active_account =
-                g_accounts.Find(g_active_account_id);
-            if (!active_account || !active_account->enabled ||
-                g_accounts.IsExpired(*active_account))
+                g_accounts.Find(session->account_id);
+            if (active_account)
             {
-                if (active_account &&
-                    SameUdpEndpoint(sender, sender_length, g_peer, g_peer_length))
-                {
-                    (void)SendAdminSession(
-                        sender,
-                        sender_length,
-                        *active_account,
-                        g_peer_secret,
-                        false,
-                        g_accounts.IsExpired(*active_account)
-                            ? "This administrator account has expired."
-                            : "This administrator account is disabled.");
-                }
-                ClearPeer();
-                ++g_stats.rejected;
-                continue;
+                (void)SendAdminSession(
+                    sender,
+                    sender_length,
+                    *active_account,
+                    session->secret,
+                    false,
+                    g_accounts.IsExpired(*active_account)
+                        ? "This administrator account has expired."
+                        : (!active_account->enabled
+                            ? "This administrator account is disabled."
+                            : "This administrator access key has changed."));
             }
+            const NeoPttSessionId invalid_session_id = session->id;
+            RemoveSession(invalid_session_id);
+            ++g_stats.rejected;
+            continue;
         }
 
         // -------------------------------------------------
@@ -1012,41 +1150,35 @@ std::uint64_t NeoPtt_Poll()
         voicebridge::AdminActionCommandData
             admin_action{};
 
-        if (g_has_peer &&
-            !g_peer_secret.empty() &&
+        if (session &&
+            !session->secret.empty() &&
             voicebridge::
                 TryParseAuthenticatedAdminActionCommand(
                     packet,
-                    g_peer_secret,
+                    session->secret,
                     admin_action))
         {
-            if (!g_has_peer ||
-                !SameUdpEndpoint(
-                    sender,
-                    sender_length,
-                    g_peer,
-                    g_peer_length) ||
-                !IsFresh(
-                    admin_action.unix_time))
+            if (!IsFresh(admin_action.unix_time))
             {
                 ++g_stats.rejected;
                 continue;
             }
 
             if (admin_action.sequence ==
-                    g_last_admin_action_sequence &&
+                    session->last_admin_action_sequence &&
                 admin_action.unix_time ==
-                    g_last_admin_action_time)
+                    session->last_admin_action_time)
             {
                 ++g_stats.rejected;
                 continue;
             }
 
-            g_last_admin_action_sequence =
+            session->last_admin_action_sequence =
                 admin_action.sequence;
 
-            g_last_admin_action_time =
+            session->last_admin_action_time =
                 admin_action.unix_time;
+            session->activity_order = ++g_session_activity_order;
 
             if (g_pending_admin_actions.size() >=
                 kMaxPendingAdminActions)
@@ -1055,6 +1187,8 @@ std::uint64_t NeoPtt_Poll()
             }
 
             NeoPttAdminActionCommand queued{};
+
+            queued.session_id = session->id;
 
             queued.sequence =
                 admin_action.sequence;
@@ -1075,10 +1209,13 @@ std::uint64_t NeoPtt_Poll()
                 admin_action.text;
 
             queued.account_id =
-                g_active_account_id;
+                session->account_id;
+
+            queued.operator_name =
+                session->operator_name;
 
             queued.permissions =
-                g_active_permissions;
+                session->permissions;
 
             const neo_admin::Permission required =
                 PermissionForAction(admin_action.action);
@@ -1086,7 +1223,7 @@ std::uint64_t NeoPtt_Poll()
             queued.authorized =
                 required != neo_admin::Permission::None &&
                 neo_admin::HasPermission(
-                    g_active_permissions,
+                    session->permissions,
                     required);
 
             if (!queued.authorized)
@@ -1117,44 +1254,35 @@ std::uint64_t NeoPtt_Poll()
         voicebridge::AdminChatCommandData
             admin_chat{};
 
-        if (g_has_peer &&
-            !g_peer_secret.empty() &&
+        if (session &&
+            !session->secret.empty() &&
             voicebridge::
                 TryParseAuthenticatedAdminChatCommand(
                     packet,
-                    g_peer_secret,
+                    session->secret,
                     admin_chat))
         {
-            // Admin chat requires an existing authenticated
-            // CONNECT/PTT peer and must come from that exact
-            // UDP endpoint.
-            if (!g_has_peer ||
-                !SameUdpEndpoint(
-                    sender,
-                    sender_length,
-                    g_peer,
-                    g_peer_length) ||
-                !IsFresh(
-                    admin_chat.unix_time))
+            if (!IsFresh(admin_chat.unix_time))
             {
                 ++g_stats.rejected;
                 continue;
             }
 
             if (admin_chat.sequence ==
-                    g_last_admin_chat_sequence &&
+                    session->last_admin_chat_sequence &&
                 admin_chat.unix_time ==
-                    g_last_admin_chat_time)
+                    session->last_admin_chat_time)
             {
                 ++g_stats.rejected;
                 continue;
             }
 
-            g_last_admin_chat_sequence =
+            session->last_admin_chat_sequence =
                 admin_chat.sequence;
 
-            g_last_admin_chat_time =
+            session->last_admin_chat_time =
                 admin_chat.unix_time;
+            session->activity_order = ++g_session_activity_order;
 
             if (g_pending_admin_chats.size() >=
                 kMaxPendingAdminChats)
@@ -1163,6 +1291,8 @@ std::uint64_t NeoPtt_Poll()
             }
 
             NeoPttAdminChatCommand queued{};
+
+            queued.session_id = session->id;
 
             queued.sequence =
                 admin_chat.sequence;
@@ -1174,11 +1304,14 @@ std::uint64_t NeoPtt_Poll()
                 admin_chat.message;
 
             queued.account_id =
-                g_active_account_id;
+                session->account_id;
+
+            queued.operator_name =
+                session->operator_name;
 
             queued.authorized =
                 neo_admin::HasPermission(
-                    g_active_permissions,
+                    session->permissions,
                     neo_admin::Permission::SendChat);
 
             if (!queued.authorized)
@@ -1208,43 +1341,40 @@ std::uint64_t NeoPtt_Poll()
         voicebridge::TeleportCommandData
             teleport{};
 
-        if (g_has_peer &&
-            !g_peer_secret.empty() &&
+        if (session &&
+            !session->secret.empty() &&
             neo_admin::HasPermission(
-                g_active_permissions,
+                session->permissions,
                 neo_admin::Permission::TeleportPlayers) &&
             voicebridge::
                 TryParseAuthenticatedTeleportCommand(
                     packet,
-                    g_peer_secret,
+                    session->secret,
                     teleport))
         {
-            if (!g_has_peer ||
-                !SameUdpEndpoint(
-                    sender,
-                    sender_length,
-                    g_peer,
-                    g_peer_length) ||
-                !IsFresh(teleport.unix_time))
+            if (!IsFresh(teleport.unix_time))
             {
                 ++g_stats.rejected;
                 continue;
             }
 
             if (teleport.sequence ==
-                    g_last_teleport_sequence &&
+                    session->last_teleport_sequence &&
                 teleport.unix_time ==
-                    g_last_teleport_time)
+                    session->last_teleport_time)
             {
                 ++g_stats.rejected;
                 continue;
             }
 
-            g_last_teleport_sequence =
+            session->last_teleport_sequence =
                 teleport.sequence;
 
-            g_last_teleport_time =
+            session->last_teleport_time =
                 teleport.unix_time;
+            session->activity_order = ++g_session_activity_order;
+
+            g_pending_teleport.session_id = session->id;
 
             g_pending_teleport.sequence =
                 teleport.sequence;
@@ -1281,20 +1411,15 @@ std::uint64_t NeoPtt_Poll()
         voicebridge::PushToTalkCommandData
             command{};
 
-        if (!g_has_peer ||
-            g_peer_secret.empty() ||
-            !SameUdpEndpoint(
-                sender,
-                sender_length,
-                g_peer,
-                g_peer_length) ||
+        if (!session ||
+            session->secret.empty() ||
             !neo_admin::HasPermission(
-                g_active_permissions,
+                session->permissions,
                 neo_admin::Permission::BroadcastVoice) ||
             !voicebridge::
                 TryParseAuthenticatedPushToTalkCommand(
                     packet,
-                    g_peer_secret,
+                    session->secret,
                     command))
         {
             ++g_stats.rejected;
@@ -1307,6 +1432,8 @@ std::uint64_t NeoPtt_Poll()
             continue;
         }
 
+        session->activity_order = ++g_session_activity_order;
+
         ++g_stats.authenticated;
 
         g_stats.payload_bytes +=
@@ -1318,34 +1445,24 @@ std::uint64_t NeoPtt_Poll()
 
         ++accepted_this_poll;
 
-        g_pending_frame.sequence =
-            command.sequence;
-
-        g_pending_frame.unix_time =
-            command.unix_time;
-
-        g_pending_frame.sample_rate =
-            command.sample_rate;
-
-        g_pending_frame.sequence_bytes =
-            command.sequence_bytes;
-
-        g_pending_frame.section_number =
-            command.section_number;
-
-        g_pending_frame.uncompressed_sample_offset =
+        NeoPttFrame pending{};
+        pending.sequence = command.sequence;
+        pending.unix_time = command.unix_time;
+        pending.sample_rate = command.sample_rate;
+        pending.sequence_bytes = command.sequence_bytes;
+        pending.section_number = command.section_number;
+        pending.uncompressed_sample_offset =
             command.uncompressed_sample_offset;
+        pending.num_packets = command.num_packets;
+        pending.voice_level = command.voice_level;
+        pending.payload = std::move(command.payload);
 
-        g_pending_frame.num_packets =
-            command.num_packets;
-
-        g_pending_frame.voice_level =
-            command.voice_level;
-
-        g_pending_frame.payload =
-            command.payload;
-
-        g_has_pending_frame = true;
+        // UDP packets can arrive in a burst between CS2 frames. Retaining only
+        // the last packet clipped most syllables; keep a short, latency-bounded
+        // queue and let the game thread drain it in order.
+        if (g_pending_frames.size() >= kMaxPendingPttFrames)
+            g_pending_frames.pop_front();
+        g_pending_frames.push_back(std::move(pending));
     }
 
     return accepted_this_poll;
@@ -1354,13 +1471,11 @@ std::uint64_t NeoPtt_Poll()
 bool NeoPtt_TryPop(
     NeoPttFrame& frame)
 {
-    if (!g_has_pending_frame)
+    if (g_pending_frames.empty())
         return false;
 
-    frame = g_pending_frame;
-
-    g_pending_frame = {};
-    g_has_pending_frame = false;
+    frame = std::move(g_pending_frames.front());
+    g_pending_frames.pop_front();
 
     return true;
 }
@@ -1406,15 +1521,12 @@ bool NeoPtt_TakeTeleport(
     return true;
 }
 
-bool NeoPtt_SendAccountCatalog()
+bool NeoPtt_SendAccountCatalog(NeoPttSessionId session_id)
 {
-    if (!NeoPtt_HasPeer() || g_peer_secret.empty() ||
-        !neo_admin::HasPermission(
-            g_active_permissions,
+    if (!FindAuthorizedSession(
+            session_id,
             neo_admin::Permission::ManageAccounts))
-    {
         return false;
-    }
 
     const std::string catalog = g_accounts.BuildCatalogJson();
     if (catalog.empty() || catalog.size() > 60000)
@@ -1430,8 +1542,7 @@ bool NeoPtt_SendAccountCatalog()
             catalog.size()),
     };
 
-    return NeoPtt_SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(data, g_peer_secret));
+    return NeoPtt_SendVoicePacketTo(session_id, data);
 }
 
 bool NeoPtt_SaveAdminAccount(
@@ -1442,15 +1553,12 @@ bool NeoPtt_SaveAdminAccount(
     return g_accounts.Upsert(request_json, acting_account_id, message);
 }
 
-bool NeoPtt_SendGameAdminCatalog()
+bool NeoPtt_SendGameAdminCatalog(NeoPttSessionId session_id)
 {
-    if (!NeoPtt_HasPeer() || g_peer_secret.empty() ||
-        !neo_admin::HasPermission(
-            g_active_permissions,
+    if (!FindAuthorizedSession(
+            session_id,
             neo_admin::Permission::ManageGameAdmins))
-    {
         return false;
-    }
     const std::string catalog = g_game_admins.BuildCatalogJson();
     if (catalog.empty() || catalog.size() > 60000)
         return false;
@@ -1463,8 +1571,7 @@ bool NeoPtt_SendGameAdminCatalog()
             reinterpret_cast<const std::uint8_t*>(catalog.data()),
             catalog.size()),
     };
-    return NeoPtt_SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(data, g_peer_secret));
+    return NeoPtt_SendVoicePacketTo(session_id, data);
 }
 
 bool NeoPtt_SaveGameAdmin(
@@ -1481,15 +1588,12 @@ bool NeoPtt_DeleteGameAdmin(
     return g_game_admins.Remove(steam_id, message);
 }
 
-bool NeoPtt_SendAuditCatalog()
+bool NeoPtt_SendAuditCatalog(NeoPttSessionId session_id)
 {
-    if (!NeoPtt_HasPeer() || g_peer_secret.empty() ||
-        !neo_admin::HasPermission(
-            g_active_permissions,
+    if (!FindAuthorizedSession(
+            session_id,
             neo_admin::Permission::ViewAuditLog))
-    {
         return false;
-    }
 
     const std::string catalog = g_audit.BuildCatalogJson();
     if (catalog.empty() || catalog.size() > 60000)
@@ -1503,19 +1607,15 @@ bool NeoPtt_SendAuditCatalog()
             reinterpret_cast<const std::uint8_t*>(catalog.data()),
             catalog.size()),
     };
-    return NeoPtt_SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(data, g_peer_secret));
+    return NeoPtt_SendVoicePacketTo(session_id, data);
 }
 
-bool NeoPtt_SendBanCatalog()
+bool NeoPtt_SendBanCatalog(NeoPttSessionId session_id)
 {
-    if (!NeoPtt_HasPeer() || g_peer_secret.empty() ||
-        !neo_admin::HasPermission(
-            g_active_permissions,
+    if (!FindAuthorizedSession(
+            session_id,
             neo_admin::Permission::ManageBans))
-    {
         return false;
-    }
 
     const std::string catalog = g_bans.BuildCatalogJson();
     if (catalog.empty() || catalog.size() > 60000)
@@ -1529,14 +1629,13 @@ bool NeoPtt_SendBanCatalog()
             reinterpret_cast<const std::uint8_t*>(catalog.data()),
             catalog.size()),
     };
-    return NeoPtt_SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(data, g_peer_secret));
+    return NeoPtt_SendVoicePacketTo(session_id, data);
 }
 
-bool NeoPtt_SendDisciplineCatalog()
+bool NeoPtt_SendDisciplineCatalog(NeoPttSessionId session_id)
 {
-    if (!NeoPtt_HasPeer() || g_peer_secret.empty() ||
-        !neo_admin::HasPermission(g_active_permissions,
+    if (!FindAuthorizedSession(
+            session_id,
             neo_admin::Permission::ManageDiscipline))
         return false;
     const std::string catalog = g_discipline.BuildRestrictionCatalogJson();
@@ -1550,14 +1649,15 @@ bool NeoPtt_SendDisciplineCatalog()
         .payload = std::span<const std::uint8_t>(
             reinterpret_cast<const std::uint8_t*>(catalog.data()), catalog.size()),
     };
-    return NeoPtt_SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(data, g_peer_secret));
+    return NeoPtt_SendVoicePacketTo(session_id, data);
 }
 
-bool NeoPtt_SendDisciplineHistory(std::string_view steam_id)
+bool NeoPtt_SendDisciplineHistory(
+    NeoPttSessionId session_id,
+    std::string_view steam_id)
 {
-    if (!NeoPtt_HasPeer() || g_peer_secret.empty() ||
-        !neo_admin::HasPermission(g_active_permissions,
+    if (!FindAuthorizedSession(
+            session_id,
             neo_admin::Permission::ManageDiscipline))
         return false;
     const std::string catalog = g_discipline.BuildHistoryJson(steam_id);
@@ -1570,14 +1670,13 @@ bool NeoPtt_SendDisciplineHistory(std::string_view steam_id)
         .payload = std::span<const std::uint8_t>(
             reinterpret_cast<const std::uint8_t*>(catalog.data()), catalog.size()),
     };
-    return NeoPtt_SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(data, g_peer_secret));
+    return NeoPtt_SendVoicePacketTo(session_id, data);
 }
 
-bool NeoPtt_SendMapRotationCatalog()
+bool NeoPtt_SendMapRotationCatalog(NeoPttSessionId session_id)
 {
-    if (!NeoPtt_HasPeer() || g_peer_secret.empty() ||
-        !neo_admin::HasPermission(g_active_permissions,
+    if (!FindAuthorizedSession(
+            session_id,
             neo_admin::Permission::ManageMapRotation))
         return false;
     const std::string catalog = g_operations.BuildRotationJson();
@@ -1588,14 +1687,14 @@ bool NeoPtt_SendMapRotationCatalog()
         .payload = std::span<const std::uint8_t>(
             reinterpret_cast<const std::uint8_t*>(catalog.data()), catalog.size()),
     };
-    return catalog.size() <= 60000 && NeoPtt_SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(data, g_peer_secret));
+    return catalog.size() <= 60000 &&
+        NeoPtt_SendVoicePacketTo(session_id, data);
 }
 
-bool NeoPtt_SendAnnouncementCatalog()
+bool NeoPtt_SendAnnouncementCatalog(NeoPttSessionId session_id)
 {
-    if (!NeoPtt_HasPeer() || g_peer_secret.empty() ||
-        !neo_admin::HasPermission(g_active_permissions,
+    if (!FindAuthorizedSession(
+            session_id,
             neo_admin::Permission::ManageAnnouncements))
         return false;
     const std::string catalog = g_operations.BuildAnnouncementsJson();
@@ -1606,8 +1705,8 @@ bool NeoPtt_SendAnnouncementCatalog()
         .payload = std::span<const std::uint8_t>(
             reinterpret_cast<const std::uint8_t*>(catalog.data()), catalog.size()),
     };
-    return catalog.size() <= 60000 && NeoPtt_SendDatagram(
-        voicebridge::BuildAuthenticatedVoicePacket(data, g_peer_secret));
+    return catalog.size() <= 60000 &&
+        NeoPtt_SendVoicePacketTo(session_id, data);
 }
 
 void NeoPtt_RecordAudit(

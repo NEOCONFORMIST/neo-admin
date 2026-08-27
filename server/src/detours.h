@@ -87,7 +87,8 @@ bool SetupFireOutputInternalDetour();
 // Broadcast one authenticated NEO ADMIN
 // message into normal CS2 text chat.
 void NeoAdmin_BroadcastChat(
-    const char* text);
+    const char* text,
+    const char* sender_name = nullptr);
 
 void FASTCALL Detour_UTIL_SayTextFilter(IRecipientFilter&, const char*, CCSPlayerController*, uint64);
 void FASTCALL Detour_UTIL_SayText2Filter(IRecipientFilter&, CCSPlayerController*, uint64, const char*, const char*, const char*, const char*, const char*);

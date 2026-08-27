@@ -1,0 +1,10 @@
+﻿{
+    "MapName":  "de_overpass",
+    "DisplayName":  "Overpass",
+    "PosX":  -4831,
+    "PosY":  1781,
+    "Scale":  5.2,
+    "Rotate":  false,
+    "ImageFile":  "de_overpass.png",
+    "Notes":  "CS2 game-depot radar. Extra radar levels: "
+}

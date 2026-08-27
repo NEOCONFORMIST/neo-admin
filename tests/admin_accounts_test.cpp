@@ -1,5 +1,6 @@
 #include "neo_admin_accounts.h"
 #include "neo_admin_permissions.h"
+#include "voicebridge_protocol.h"
 
 #include <filesystem>
 #include <fstream>
@@ -50,6 +51,13 @@ int main()
         store.ResolveSecret(*owner) != secret_bytes)
     {
         return 4;
+    }
+    const std::string owner_selector =
+        voicebridge::BuildAdminAccessSelector(secret_bytes);
+    if (store.FindByAccessSelector(owner_selector) != owner ||
+        store.FindByAccessSelector("key_0000000000000000000000000000"))
+    {
+        return 29;
     }
 
     const std::string moderator_key =
@@ -170,6 +178,12 @@ int main()
         fresh.ResolveSecret(*first_owner) != owner_key_bytes)
     {
         return 12;
+    }
+    if (fresh.FindByAccessSelector(
+            voicebridge::BuildAdminAccessSelector(owner_key_bytes)) !=
+        first_owner)
+    {
+        return 30;
     }
 
     if (fresh.BootstrapOwner(

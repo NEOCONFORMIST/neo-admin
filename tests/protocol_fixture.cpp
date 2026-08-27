@@ -95,12 +95,23 @@ int main(int argc, char** argv)
         return 6;
 
     const std::string account_id = "owner";
+    const std::string operator_name = "Neo Conform";
+    const std::string access_selector =
+        voicebridge::BuildAdminAccessSelector(
+            std::span<const std::uint8_t>(
+                reinterpret_cast<const std::uint8_t*>(secret.data()),
+                secret.size()));
+    if (access_selector.size() != 32 ||
+        !access_selector.starts_with("key_"))
+    {
+        return 7;
+    }
     const voicebridge::VoicePacketData login_data{
         .message_type = voicebridge::kMessageAdminLoginCommand,
         .sequence = 777,
         .tick = 1787529600,
         .player_slot = -1,
-        .player_name = {},
+        .player_name = operator_name,
         .packet_offsets = {},
         .payload = std::span<const std::uint8_t>(
             reinterpret_cast<const std::uint8_t*>(account_id.data()),
@@ -123,9 +134,38 @@ int main(int argc, char** argv)
                 secret.size()),
             parsed_login) ||
         parsed_login.account_id != account_id ||
+        parsed_login.display_name != operator_name ||
         parsed_login.sequence != 777)
     {
-        return 7;
+        return 9;
+    }
+
+    const voicebridge::VoicePacketData legacy_login_data{
+        .message_type = voicebridge::kMessageAdminLoginCommand,
+        .sequence = 776,
+        .tick = 1787529599,
+        .player_slot = -1,
+        .player_name = {},
+        .packet_offsets = {},
+        .payload = std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(account_id.data()),
+            account_id.size()),
+    };
+    const auto legacy_login_packet =
+        voicebridge::BuildAuthenticatedVoicePacket(
+            legacy_login_data,
+            std::span<const std::uint8_t>(
+                reinterpret_cast<const std::uint8_t*>(secret.data()),
+                secret.size()));
+    if (!voicebridge::TryParseAuthenticatedAdminLoginCommand(
+            legacy_login_packet,
+            std::span<const std::uint8_t>(
+                reinterpret_cast<const std::uint8_t*>(secret.data()),
+                secret.size()),
+            parsed_login) ||
+        !parsed_login.display_name.empty())
+    {
+        return 11;
     }
 
     auto tampered_login = login_packet;
@@ -137,7 +177,7 @@ int main(int argc, char** argv)
                 secret.size()),
             parsed_login))
     {
-        return 8;
+        return 10;
     }
 
     const std::string setup_code =

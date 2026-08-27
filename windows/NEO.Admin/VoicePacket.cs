@@ -24,6 +24,7 @@ internal enum BridgeMessageType : byte
     MapRotationCatalog = 23,
     AnnouncementCatalog = 24,
     GameAdminCatalog = 25,
+    MapOverviewChunk = 26,
 }
 
 internal enum VoiceAudioFormat : byte
@@ -165,6 +166,30 @@ internal sealed record VoicePacket(
         BridgeMessageType.AnnouncementCatalog
             ? Encoding.UTF8.GetString(Payload)
             : string.Empty;
+    public string MapOverviewName =>
+        MessageType == BridgeMessageType.MapOverviewChunk
+            ? PlayerName
+            : string.Empty;
+    public int MapOverviewChunkIndex =>
+        MessageType == BridgeMessageType.MapOverviewChunk
+            ? PlayerSlot
+            : -1;
+    public uint MapOverviewChunkCount =>
+        MessageType == BridgeMessageType.MapOverviewChunk
+            ? SampleRate
+            : 0;
+    public ulong MapOverviewPackageLength =>
+        MessageType == BridgeMessageType.MapOverviewChunk
+            ? SteamId
+            : 0;
+    public uint MapOverviewPackageHash =>
+        MessageType == BridgeMessageType.MapOverviewChunk
+            ? unchecked((uint)SequenceBytes)
+            : 0;
+    public uint MapOverviewDefinitionLength =>
+        MessageType == BridgeMessageType.MapOverviewChunk
+            ? SectionNumber
+            : 0;
     public double RoundTripMilliseconds { get; init; } = double.NaN;
     public double PacketLossPercent { get; init; } = double.NaN;
 
@@ -241,7 +266,8 @@ internal sealed record VoicePacket(
                 BridgeMessageType.DisciplineHistory or
                 BridgeMessageType.MapRotationCatalog or
                 BridgeMessageType.AnnouncementCatalog or
-                BridgeMessageType.GameAdminCatalog))
+                BridgeMessageType.GameAdminCatalog or
+                BridgeMessageType.MapOverviewChunk))
         {
             error =
                 $"Unsupported protocol version/type: {version}/{(byte)messageType}.";
@@ -320,6 +346,27 @@ internal sealed record VoicePacket(
             {
                 error =
                     "A map-catalog packet contains invalid payload metadata.";
+                return false;
+            }
+        }
+        else if (messageType == BridgeMessageType.MapOverviewChunk)
+        {
+            if (nameLength == 0 ||
+                nameLength > 96 ||
+                offsetCount != 0 ||
+                payloadLength == 0 ||
+                payloadLength > 1200 ||
+                playerSlot < 0 ||
+                sampleRate == 0 ||
+                sampleRate > 2048 ||
+                (uint)playerSlot >= sampleRate ||
+                steamId == 0 ||
+                steamId > 2U * 1024U * 1024U ||
+                sectionNumber == 0 ||
+                sectionNumber > 64U * 1024U)
+            {
+                error =
+                    "A map-overview chunk contains invalid payload metadata.";
                 return false;
             }
         }

@@ -193,6 +193,7 @@ internal sealed class UdpVoiceReceiver : IAsyncDisposable
             BridgeCommandPacket.BuildAdminLogin(
                 NextCommandSequence(),
                 _adminId,
+                _config.AdminDisplayName,
                 _secret);
 
         bool connectSent =

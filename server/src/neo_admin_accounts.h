@@ -17,6 +17,7 @@ struct Account
     bool enabled = true;
     bool uses_server_secret = false;
     std::string secret;
+    std::string access_selector;
     std::string created_utc;
     std::uint64_t expires_unix = 0;
 };
@@ -40,6 +41,7 @@ public:
         std::string& error);
 
     const Account* Find(std::string_view id) const;
+    const Account* FindByAccessSelector(std::string_view selector) const;
     const Account* FindBySteamId(std::uint64_t steam_id) const;
     bool IsExpired(const Account& account) const;
     std::vector<std::uint8_t> ResolveSecret(const Account& account) const;

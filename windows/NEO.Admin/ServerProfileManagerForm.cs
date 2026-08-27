@@ -195,7 +195,7 @@ internal sealed class ServerProfileEditorForm : NeoForm
         table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         AddRow(table, 0, "Name", _name);
-        AddRow(table, 1, "Server address", _address);
+        AddRow(table, 1, "Public IPv4 / DNS", _address);
         AddRow(table, 2, "PTT port", _port);
         AddRow(table, 3, "Administrator ID", _adminId);
         AddRow(table, 4, "Access key", _accessKey);

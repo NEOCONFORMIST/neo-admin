@@ -9,6 +9,7 @@ internal sealed class AppConfig
     public int Port { get; init; } = 27120;
     public string SharedSecret { get; init; } = string.Empty;
     public string AdminId { get; init; } = "owner";
+    public string AdminDisplayName { get; init; } = string.Empty;
     public string AllowedServerIp { get; init; } = string.Empty;
     public float MasterVolume { get; init; } = 0.8f;
     public bool EnableServerHealthPanel { get; init; }

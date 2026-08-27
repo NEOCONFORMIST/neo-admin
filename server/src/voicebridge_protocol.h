@@ -60,6 +60,7 @@ constexpr std::uint8_t kMessageDisciplineHistory = 22;
 constexpr std::uint8_t kMessageMapRotationCatalog = 23;
 constexpr std::uint8_t kMessageAnnouncementCatalog = 24;
 constexpr std::uint8_t kMessageGameAdminCatalog = 25;
+constexpr std::uint8_t kMessageMapOverviewChunk = 26;
 
 enum class AdminActionCode : std::uint32_t
 {
@@ -103,6 +104,7 @@ enum class AdminActionCode : std::uint32_t
 
     // Request an authenticated server health snapshot.
     RequestServerHealth = 50,
+    RequestMapOverview = 51,
 
     RequestAdminAccounts = 100,
     SaveAdminAccount = 101,
@@ -185,6 +187,7 @@ struct AdminLoginCommandData
     std::uint32_t sequence = 0;
     std::uint32_t unix_time = 0;
     std::string account_id;
+    std::string display_name;
 };
 
 struct FirstOwnerClaimData
@@ -245,6 +248,12 @@ bool TryParseAuthenticatedConnectCommand(
 bool TryReadAdminLoginAccountId(
     std::span<const std::uint8_t> datagram,
     std::string& account_id);
+
+// Builds a non-secret account selector from an access key. New clients can
+// authenticate with only the access key while the server still resolves the
+// real account before verifying the signed login packet.
+std::string BuildAdminAccessSelector(
+    std::span<const std::uint8_t> account_secret);
 
 bool TryParseAuthenticatedAdminLoginCommand(
     std::span<const std::uint8_t> datagram,

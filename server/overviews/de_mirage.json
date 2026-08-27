@@ -1,0 +1,10 @@
+﻿{
+    "MapName":  "de_mirage",
+    "DisplayName":  "Mirage",
+    "PosX":  -3230,
+    "PosY":  1713,
+    "Scale":  5,
+    "Rotate":  false,
+    "ImageFile":  "de_mirage.png",
+    "Notes":  "CS2 game-depot radar. Extra radar levels: "
+}
