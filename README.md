@@ -81,16 +81,6 @@ build, the script creates a private signing key under
 `%LOCALAPPDATA%/NEO ADMIN/android-signing`. Keep that key private and backed up;
 Android requires future updates to use the same signing certificate.
 
-## Screenshots
-
-### Windows client
-
-<img src="docs/images/windows-live-map-current.png" alt="NEO ADMIN Windows client showing the live map and operations panel" width="900">
-
-### Android client
-
-<img src="docs/images/android-live-map.png" alt="NEO ADMIN Android client showing the live map" width="360">
-
 ## Downloads And Installation
 
 Prebuilt server, Windows, and Android packages are available on the
