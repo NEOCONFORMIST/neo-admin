@@ -38,6 +38,16 @@ monitoring players and controlling a server from a desktop or phone.
 - **CounterStrikeSharp coexistence:** Designed to run beside
   CounterStrikeSharp on a Metamod-enabled CS2 server.
 
+## Screenshots
+
+### Windows live map and operations
+
+<img src="docs/images/windows-live-map-public.png" alt="NEO ADMIN Windows client showing the live map and player controls" width="900">
+
+### Android live map
+
+<img src="docs/images/android-live-map-public.png" alt="NEO ADMIN Android client showing the live map" width="360">
+
 ## Build From Source
 
 ### Server plugin
